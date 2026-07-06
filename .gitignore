@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# Env & secrets — never commit keys
+.env
+*.env
+!.env.example
+
+# Forge runtime artifacts
+graphify-out/
+.forge/
+*.log
+spill/
+
+# OS
+.DS_Store
+Thumbs.db

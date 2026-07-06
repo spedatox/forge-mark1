@@ -1,0 +1,33 @@
+# Optimus — identity file 1 of 2 (the profile).
+# Mirrors Mark VI's app/profiles/optimus.py: agent_id, model policy, tool
+# allowlist, Cell policy. The Warden engine reads this as data; it contains no
+# "Optimus" string of its own. Adding Centurion later = a sibling folder like
+# this one, plus its own system_prompt.md. No engine edit (§2).
+
+agent_id = "optimus"
+name = "Optimus"
+domain = "systems, code & infrastructure"
+
+# Model IDs live only in profiles (Rule 10, mirrored from Mark VI). The Warden
+# never hardcodes one. This is the real model used when an ANTHROPIC_API_KEY is
+# present; the offline demo overrides it with the deterministic ScriptedModel.
+model = "claude-sonnet-4-6"
+
+# Tool allowlist — Optimus is a coding agent. "coding" expands to the curated
+# file / shell / graph tool group. This list IS the security boundary (§2/§4).
+tools = ["coding"]
+
+# One working mode with the safety gate always on; "plan" would make it
+# read-only for review (§6).
+permission_mode = "act"
+
+# The single iteration ceiling (§3). Matches Mark VI's own 30-iteration guard.
+max_iterations = 30
+
+[cell]
+# Default posture: no outbound network unless a job explicitly requests it (§8).
+allow_network = false
+cpus = 2.0
+memory_mb = 2048
+timeout_s = 120
+# backend = "docker"   # optional per-agent override of FORGE_CELL_BACKEND

@@ -1,0 +1,31 @@
+[project]
+name = "forge"
+version = "0.2.0"  # Mark II
+description = "The Forge — standalone privileged execution peer for S.P.E.D.A. Mark VI"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.6",
+    "websockets>=12.0",
+    "anthropic>=0.40",
+]
+
+[project.optional-dependencies]
+# Graphify is the codebase-understanding dependency (§5). Optional at install
+# time so the Forge starts without it; the graph tool degrades to an is_error
+# result the model can react to when it is absent.
+graph = ["graphifyy>=1.0"]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
+
+[project.scripts]
+forge = "forge.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["forge"]
+
+[tool.pytest.ini_options]
+# Async tests wrap asyncio.run themselves, so no pytest-asyncio plugin is needed.
+testpaths = ["tests"]
