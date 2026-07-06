@@ -139,7 +139,7 @@ the Cell executes — never collapsed for convenience.**
 | **Cell** | `forge/cell/` | The `run / write / read / reset` sandbox contract and its Docker and subprocess backends. |
 | **Graphify** | `forge/graph/` | A Warden-side MCP sidecar exposing a queryable codebase graph. |
 | **Agents** | `forge/agents/` | The rebrandable boundary: one folder per agent, two files each. |
-| **Model** | `forge/model/` | The reasoning client — Anthropic in production, a deterministic stand-in for the demo and tests. |
+| **Model** | `forge/model/` | The reasoning client — multi-provider (`provider:model` routing across Anthropic / OpenAI / Gemini / z.ai / DeepSeek / Ollama), plus a deterministic stand-in for the demo and tests. |
 
 ### Why Python
 
@@ -202,6 +202,39 @@ thrown exception are indistinguishable to the loop: all are data the model can
 react to on its next turn. No exception escapes the loop. Oversized results are
 spilled to a file in the sandbox and replaced with a preview plus a path, so a
 single large result cannot blow the context window.
+
+### Model providers
+
+The Warden's reasoning is its own — the Forge holds its own credentials and makes
+its own inference calls; Mark VI is a job source, never an inference proxy. The
+model client is selected from the agent profile's `model` field, a
+`provider:model` ref that mirrors Mark VI's engine so both systems behave
+identically:
+
+| Provider | Ref example | Credential |
+|----------|-------------|------------|
+| Anthropic *(bare ref)* | `claude-sonnet-4-6` | `ANTHROPIC_API_KEY` |
+| OpenAI | `openai:gpt-5.1` | `OPENAI_API_KEY` |
+| Gemini | `gemini:gemini-2.5-flash` | `GEMINI_API_KEY` |
+| z.ai (GLM) | `zai:glm-4.6` | `ZAI_API_KEY` |
+| DeepSeek | `deepseek:deepseek-v4-pro` | `DEEPSEEK_API_KEY` |
+| Ollama *(local)* | `ollama:llama3.1:8b` | none (`OLLAMA_BASE_URL`) |
+
+Anthropic refs use the native SDK. Every other provider shares **one**
+OpenAI-compatible adapter (`forge/model/providers.py`): the Warden's Anthropic
+content-block history is translated to the chat-completions dialect at the request
+boundary, and streamed deltas plus reassembled `tool_call` fragments are
+translated back into the loop's text/tool-use events. Provider-specific quirks
+that would otherwise break the tool loop are handled there (e.g. DeepSeek-V4
+thinking mode is disabled when tools are present; assistant tool-call messages
+carry `""` rather than `null` content, which GLM rejects).
+
+Selection is via `build_model` in `forge/model/factory.py`. An optional
+`FORGE_LLM_FALLBACK_CHAIN` (comma-separated refs) provides operator-configured
+provider redundancy — tried in order only while *opening* a stream, off by
+default. This is the single, opt-in departure from the Forge's baseline
+"one model, fail loud" stance; it is redundancy for an operator who runs several
+providers, not an automatic per-turn escalation ladder.
 
 ---
 
@@ -435,7 +468,10 @@ Values that are required only when used are validated at their point of use and
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `ANTHROPIC_API_KEY` | — | Reasoning model credential. Not needed for `demo`. |
+| `ANTHROPIC_API_KEY` | — | Anthropic (bare model refs). Not needed for `demo`. |
+| `OPENAI_API_KEY` / `GEMINI_API_KEY` / `ZAI_API_KEY` / `DEEPSEEK_API_KEY` | — | Keys for the corresponding `provider:model` refs. |
+| `OLLAMA_BASE_URL` | `http://localhost:11434/v1` | Local Ollama endpoint for `ollama:` refs. |
+| `FORGE_LLM_FALLBACK_CHAIN` | *(off)* | Optional comma-separated `provider:model` fallback refs. |
 | `SPEDA_API_KEY` | — | Authenticates the peer's WebSocket handshake to Mark VI. |
 | `SPEDA_WS_URL` | `ws://127.0.0.1:8000/agents/ws/optimus` | Mark VI agents endpoint. |
 | `FORGE_CELL_BACKEND` | `auto` | `docker` \| `subprocess` \| `auto`. |
@@ -524,7 +560,10 @@ deployment?** If yes, it is product scaffolding and is omitted.
 - Telemetry and analytics event logging.
 - Feature-flag / A-B rollout infrastructure.
 - Multiple simultaneous entrypoint modes.
-- Model-fallback escalation ladders and layered recovery state machines.
+- Automatic model-fallback escalation ladders and layered recovery state machines.
+  (Multi-provider *selection* is supported, and an *opt-in, off-by-default*
+  provider-redundancy chain exists for an operator who runs several providers —
+  but there is no automatic per-turn token/model escalation.)
 - Permission-prompt UI systems, denial-tracking, and multi-source rule layering.
 - A speculative context-compaction cascade.
 

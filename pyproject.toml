@@ -14,7 +14,11 @@ dependencies = [
 # time so the Forge starts without it; the graph tool degrades to an is_error
 # result the model can react to when it is absent.
 graph = ["graphifyy>=1.0"]
-dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
+# Non-Anthropic providers (OpenAI / Gemini / z.ai / DeepSeek / Ollama) share the
+# OpenAI client. Only needed when a profile uses a "provider:model" ref for one
+# of them; Anthropic-only deployments don't need it.
+providers = ["openai>=1.40"]
+dev = ["pytest>=8.0"]
 
 [project.scripts]
 forge = "forge.__main__:main"

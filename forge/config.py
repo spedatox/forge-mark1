@@ -18,8 +18,17 @@ def _env(name: str, default: str = "") -> str:
 
 @dataclass(frozen=True)
 class ForgeSettings:
-    # LLM
+    # LLM — multi-provider, routed by the profile's "provider:model" ref
+    # (bare name → Anthropic). Mirrors Mark VI's llm_client.
     anthropic_api_key: str = ""
+    openai_api_key: str = ""
+    gemini_api_key: str = ""
+    zai_api_key: str = ""
+    deepseek_api_key: str = ""
+    ollama_base_url: str = "http://localhost:11434/v1"
+    # Opt-in provider redundancy: comma-separated "provider:model" refs tried in
+    # order when opening the primary stream fails. Empty = off (fail loud).
+    llm_fallback_chain: str = ""
 
     # Mark VI link
     speda_api_key: str = ""
@@ -37,6 +46,12 @@ class ForgeSettings:
     def from_env(cls) -> "ForgeSettings":
         return cls(
             anthropic_api_key=_env("ANTHROPIC_API_KEY"),
+            openai_api_key=_env("OPENAI_API_KEY"),
+            gemini_api_key=_env("GEMINI_API_KEY"),
+            zai_api_key=_env("ZAI_API_KEY"),
+            deepseek_api_key=_env("DEEPSEEK_API_KEY"),
+            ollama_base_url=_env("OLLAMA_BASE_URL", "http://localhost:11434/v1"),
+            llm_fallback_chain=_env("FORGE_LLM_FALLBACK_CHAIN"),
             speda_api_key=_env("SPEDA_API_KEY"),
             speda_ws_url=_env("SPEDA_WS_URL", "ws://127.0.0.1:8000/agents/ws/optimus"),
             cell_backend=_env("FORGE_CELL_BACKEND", "auto") or "auto",

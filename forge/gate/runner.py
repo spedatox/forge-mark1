@@ -123,7 +123,8 @@ async def run_job(
 
 
 def _build_model(cfg: AgentConfig, settings: ForgeSettings) -> Model:
-    """Construct the real model from the profile's model_ref. No fallback ladder
-    (§3 rejected): one model, and a missing key fails loud."""
-    from forge.model.anthropic_model import AnthropicModel
-    return AnthropicModel(model_id=cfg.model_ref, api_key=settings.anthropic_api_key)
+    """Construct the model from the profile's ``provider:model`` ref via the
+    multi-provider factory (Anthropic / OpenAI / Gemini / z.ai / DeepSeek /
+    Ollama). A missing key for the selected provider fails loud."""
+    from forge.model.factory import build_model
+    return build_model(cfg.model_ref, settings)
