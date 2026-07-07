@@ -480,8 +480,3 @@ tests/
 
 Private project — not licensed for redistribution.
 
----
-
-<p align="center">
-  <strong>The Warden reasons. The Cell executes. Neither is collapsed for convenience.</strong>
-</p>
