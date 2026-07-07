@@ -33,6 +33,9 @@ class JobRequest(BaseModel):
     constraints: JobConstraints = Field(default_factory=JobConstraints)
     repo_path: str | None = None        # project under work; Cell workspace + graph root
     job_id: str = Field(default_factory=lambda: uuid.uuid4().hex)
+    # Per-job model override — when set (e.g. by Heartbreaker's model picker),
+    # this ref replaces the agent profile's default model for this job only.
+    model_override: str | None = None
 
 
 class JobEvent(BaseModel):
@@ -68,6 +71,9 @@ def job_from_chat_request(frame: dict[str, Any], agent_id: str) -> JobRequest:
         task=task,
         repo_path=frame.get("cwd"),
         job_id=str(frame.get("chat_id", uuid.uuid4().hex)),
+        # Heartbreaker's model picker / per-agent pin — None lets the profile
+        # default apply; a value overrides it for this turn only.
+        model_override=frame.get("model"),
     )
 
 

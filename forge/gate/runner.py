@@ -85,7 +85,11 @@ async def run_job(
             await graph.start()
             await out("chunk", f"[graph: {'ready' if graph.available else 'unavailable'}]\n")
 
-        model = model or _build_model(cfg, settings)
+        # Heartbreaker's model picker overrides the profile's default for this
+        # job; None means "use the profile's model_ref" (Rule 10: model IDs
+        # live only in profiles, and the override is a profile-level concept).
+        model_ref = request.model_override or cfg.model_ref
+        model = model or _build_model(model_ref, settings)
 
         tools = {name: ALL_TOOLS[name]() for name in cfg.tool_names}
         ctx = ToolContext(
@@ -122,9 +126,10 @@ async def run_job(
             await cell.close()
 
 
-def _build_model(cfg: AgentConfig, settings: ForgeSettings) -> Model:
-    """Construct the model from the profile's ``provider:model`` ref via the
-    multi-provider factory (Anthropic / OpenAI / Gemini / z.ai / DeepSeek /
-    Ollama). A missing key for the selected provider fails loud."""
+def _build_model(model_ref: str, settings: ForgeSettings) -> Model:
+    """Construct the model from a ``provider:model`` ref via the multi-provider
+    factory (Anthropic / OpenAI / Gemini / z.ai / DeepSeek / Ollama).  The ref
+    is either the agent profile's default or a per-job override from Heartbreaker's
+    model picker.  A missing key for the selected provider fails loud."""
     from forge.model.factory import build_model
-    return build_model(cfg.model_ref, settings)
+    return build_model(model_ref, settings)
