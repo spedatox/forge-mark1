@@ -1,19 +1,20 @@
-<p align="center">
-  <h1 align="center">Forge Mark I</h1>
-  <p align="center">
-    Standalone privileged execution peer for <strong>S.P.E.D.A. Mark VI</strong>
-  </p>
-</p>
+<<div align="center">
 
-<p align="center">
-  <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.11+-3776AB?logo=python&logoColor=white" alt="Python 3.11+"></a>
-  <a href="#testing"><img src="https://img.shields.io/badge/tests-20%20passing-brightgreen?logo=pytest&logoColor=white" alt="Tests"></a>
-  <a href="#sandbox-isolation"><img src="https://img.shields.io/badge/sandbox-Docker%20%7C%20subprocess-informational?logo=docker&logoColor=white" alt="Sandbox"></a>
-  <a href="#multi-provider-llm-routing"><img src="https://img.shields.io/badge/LLM-6%20providers-blueviolet" alt="LLM Providers"></a>
-</p>
+# F.O.R.G.E.
 
----
+**F**ramework of **O**perational **R**untime & **G**ated **E**xecution
 
+*A standalone, single-operator execution peer for S.P.E.D.A. Mark VI.*
+
+Privileged execution — shell, generated code, and security tooling — isolated in
+its own process so the main backend never inherits its threat model.
+
+[![python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/)
+[![tests](https://img.shields.io/badge/tests-13%20passing-brightgreen.svg)](tests/test_forge.py)
+[![isolation](https://img.shields.io/badge/cell-docker%20%7C%20subprocess-informational.svg)](#5-the-cell--sandbox-isolation)
+[![status](https://img.shields.io/badge/build-Mark%20II-success.svg)](#)
+
+</div>
 ## Overview
 
 Forge Mark I is the execution backend for agents that require privileged access — shell commands, generated code execution, and security tooling — isolated in its own process so the main S.P.E.D.A. backend never inherits its threat model.
