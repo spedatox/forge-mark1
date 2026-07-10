@@ -1,4 +1,4 @@
-<<div align="center">
+<div align="center">
 
 # F.O.R.G.E.
 
@@ -15,6 +15,7 @@ its own process so the main backend never inherits its threat model.
 [![status](https://img.shields.io/badge/build-Mark%20II-success.svg)](#)
 
 </div>
+
 ## Overview
 
 Forge Mark I is the execution backend for agents that require privileged access — shell commands, generated code execution, and security tooling — isolated in its own process so the main S.P.E.D.A. backend never inherits its threat model.
