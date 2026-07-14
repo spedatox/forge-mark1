@@ -1,0 +1,35 @@
+# Centurion — identity file 1 of 2 (the profile).
+# The Forge's second agent, added purely as this sibling folder (§9): no Warden
+# edit. Mirrors Mark VI's app/profiles/centurion.py — cyber security, defensive
+# and authorized-offensive work on the owner's own assets.
+
+agent_id = "centurion"
+name = "Centurion"
+domain = "cyber security"
+
+# Model IDs live only in profiles (Rule 10). Same reasoning tier as Optimus.
+model = "claude-sonnet-4-6"
+
+# Tool allowlist — the "security" group: run security tooling in the Cell +
+# read/write scan output and reports. This list IS the security boundary (§2/§4).
+tools = ["security"]
+
+# One working mode with the safety gate always on; "plan" would make it
+# read-only for reviewing an intended engagement before it runs (§6).
+permission_mode = "act"
+
+# The single iteration ceiling (§3).
+max_iterations = 30
+
+[cell]
+# Unlike Optimus, Centurion's work is inherently networked — recon, scanning,
+# and authorized testing reach out. Outbound is ON. Everything else stays capped
+# and non-root; the Cell is still throwaway and isolated per job.
+allow_network = true
+cpus          = 2.0
+memory_mb     = 2048
+# Scans and enumeration run longer than a build step — give commands more wall-clock.
+timeout_s     = 300
+# NOTE: real tooling (nmap, nikto, …) must exist in the Cell. With the Docker
+# backend, point FORGE_CELL_IMAGE at a security image; with the subprocess
+# backend (Docker-less hosts) commands use whatever is installed on the host.

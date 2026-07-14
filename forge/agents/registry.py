@@ -12,13 +12,14 @@ import tomllib
 from pathlib import Path
 
 from forge.agents.config import AgentConfig, CellSpec
-from forge.tools import ALL_TOOLS, CODING_TOOLS
+from forge.tools import ALL_TOOLS, CODING_TOOLS, SECURITY_TOOLS
 
 AGENTS_DIR = Path(__file__).parent
 
 # Named tool groups a profile may reference instead of listing every tool.
 _TOOL_GROUPS = {
     "coding": tuple(cls.name for cls in CODING_TOOLS),
+    "security": tuple(cls.name for cls in SECURITY_TOOLS),
 }
 
 

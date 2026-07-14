@@ -13,9 +13,15 @@ from forge.tools.graph import GraphQuery, GraphPath, GraphOverview
 # Reusable tool groups, referenced by agent configs via their allowlist (§2).
 CODING_TOOLS = [ReadFile, WriteFile, EditFile, RunCommand, GraphQuery, GraphPath, GraphOverview]
 
+# Centurion's group: run security tooling in the Cell (RunCommand) and read/write
+# scan output and engagement reports (files). No graph — its subject is a live
+# target's posture, not a codebase's structure. The Cell policy (allow_network)
+# and the operator's authorization are the real boundary, not this list.
+SECURITY_TOOLS = [RunCommand, ReadFile, WriteFile, EditFile]
+
 ALL_TOOLS = {cls.name: cls for cls in [
     RunCommand, ReadFile, WriteFile, EditFile, GraphQuery, GraphPath, GraphOverview,
 ]}
 
-__all__ = ["ALL_TOOLS", "CODING_TOOLS", "RunCommand", "ReadFile", "WriteFile",
-           "EditFile", "GraphQuery", "GraphPath", "GraphOverview"]
+__all__ = ["ALL_TOOLS", "CODING_TOOLS", "SECURITY_TOOLS", "RunCommand", "ReadFile",
+           "WriteFile", "EditFile", "GraphQuery", "GraphPath", "GraphOverview"]
