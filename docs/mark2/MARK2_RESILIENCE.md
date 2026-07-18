@@ -85,8 +85,11 @@ cleanly on disconnect" — cleanly, but totally.
 {"t": "terminal", "reason": "completed", "final": "…"}
 ```
 
-- Writes happen at the same points the engine mutates `state.messages` — one
-  `journal.append()` call in each of the three append sites plus terminal.
+- The journal attaches as an **event sink** on Seam 4's `EventFan` for
+  everything event-shaped (tool records, usage, compaction markers), plus
+  direct `journal.append()` calls at the three `state.messages` mutation
+  sites for transcript records (messages aren't events — they're state; the
+  sink alone can't reconstruct them).
   Fsync per tool-cycle, not per delta (a crash loses at most the current
   turn, which resume regenerates anyway).
 - A `terminal` record marks the journal complete; a sweeper deletes journals
@@ -148,8 +151,8 @@ know what a job cost, live and after.
   output, cache-read, cache-write totals, plus `estimated_cost_usd` computed
   from a static per-model price table (`forge/model/pricing.py`; prices for
   the fleet's known models, `None` → cost omitted, table is data not logic).
-- **Live:** the engine already receives `UsageReport` per turn (W1); it
-  emits a `usage` JobEvent each turn:
+- **Live:** the engine already receives `UsageReport` per turn (W1); a
+  usage **sink** on Seam 4's `EventFan` emits a `usage` JobEvent each turn:
   `{"input": …, "output": …, "cache_read": …, "iteration": …,
   "fullness": 0.34, "est_cost_usd": 0.42}`.
 - **Peer:** `task_result` frames gain a `usage` field (additive — Mark VI's

@@ -4,8 +4,15 @@ Reach workstreams: navigation, long-running processes, the web, plan state,
 delegation, and git discipline. Every tool below follows the Mark I contract —
 `Tool` subclass, Pydantic `Args`, fail-closed harness flags, ≥3-sentence
 model-facing description (final copy written at implementation; the
-descriptions here are design intent). Registration is one line each in
-`forge/tools/__init__.py::ALL_TOOLS` + the relevant profile allowlists.
+descriptions here are design intent).
+
+**Registration (Seam 1, [MARK2_SEAMS.md](MARK2_SEAMS.md)):** every tool here
+registers through `BuiltinToolProvider` — the builtin implementation of the
+`ToolProvider` protocol that W0 introduces — plus the relevant profile
+allowlists. `ALL_TOOLS` survives as the builtin provider's internal table,
+but nothing outside it may read that dict: `run_job` folds the ordered
+provider list, so a Mark III `MCPToolProvider` or plugin tool joins by
+appending a provider, never by editing this package.
 
 ---
 
@@ -65,7 +72,10 @@ that defines a real execution peer.
 
 ### W8a — Cell contract (`cell/base.py` + both backends)
 
-Four methods and a table, added to the ABC:
+Four methods and a table, added to the ABC as **abstract** (Seam 6: a Mark
+III backend — remote VM, Firecracker, k8s pod — must implement the full
+contract to register at all; partial backends fail at registration, not at
+runtime):
 
 ```python
 async def spawn(self, command: str, env: ...) -> str            # → proc_id
@@ -205,8 +215,12 @@ commits, dirty trees handed back. The gate blocks catastrophes but nothing
 
 **Design — three small pieces:**
 
-1. **Shared prompt section** (`forge/agents/` shared fragment, appended to
-   coding profiles' system prompts): initialize a repo for any new project;
+1. **Shared prompt section** — a `PromptFragment` (`source="shared:git"`)
+   composed into coding profiles' system prompts via Seam 7's
+   `compose_system_prompt`, never string-concatenated ad hoc. This fragment
+   is deliberately the first consumer of the composition seam — the same
+   mechanism a Mark III skill uses to inject its own discipline. Content:
+   initialize a repo for any new project;
    commit at meaningful checkpoints with imperative one-line messages +
    `Forged-by: {agent}` trailer; never commit secrets/venvs/node_modules
    (write `.gitignore` first); never push unless the task says to; leave the

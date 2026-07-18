@@ -13,6 +13,13 @@ existing seam; no file is restructured. The repo stays `forge-mark1`; "Mark II"
 is the milestone. The README badge already promises it — this plan makes it
 true.
 
+**And it must leave Mark III the same courtesy.** Mark II may not hard-wire
+any capability into the engine: everything lands behind the named extension
+seams in [MARK2_SEAMS.md](MARK2_SEAMS.md), so that a Mark III plugin
+architecture (MCP servers, hooks, operator skills) is a loader over existing
+registration points — not a rewrite. That document is the enforcement
+contract; every workstream below cites the seam it lands on.
+
 ---
 
 ## The gap, in one table
@@ -38,10 +45,16 @@ Measured against Claude Code as the reference execution harness:
 | 15 | No token/cost telemetry — `Terminal` counts iterations, not dollars | Medium | [RESILIENCE](MARK2_RESILIENCE.md) |
 | 16 | Repo's own `CLAUDE.md`/`AGENTS.md` conventions are invisible to the Warden | High (cheap) | [CONTEXT](MARK2_CONTEXT.md) |
 
-**Explicitly out of scope for Mark II** (revisit for Mark III only if earned):
-MCP client, hook system, user-defined skills, multimodal input, per-step
-workspace checkpoints/rewind, notebook editing, multi-user anything. The
-"curated toolset, parameterized engine" philosophy (§2) stands.
+**Explicitly out of scope for Mark II — but architected for:** MCP client,
+hook system, and user-defined skills are **Mark III features whose seams Mark
+II is required to ship** — tool provision, permission middleware, dispatch
+hooks, event sinks, provider/backend registries, prompt fragments
+([MARK2_SEAMS.md](MARK2_SEAMS.md)). Mark III then costs a manifest format and
+a loader, zero engine changes. Genuinely out of scope with no seam
+obligation: multimodal input, per-step workspace checkpoints/rewind, notebook
+editing, multi-user anything. The "curated toolset, parameterized engine"
+philosophy (§2) stands for what *ships*; the seams govern what can be
+*added*.
 
 ## What already matches Claude Code — do not rebuild
 
@@ -61,6 +74,7 @@ model-fallback chain on stream-open failure, secret-scrubbed Cell env, and the
 
 | Doc | Workstreams | New/changed files |
 |---|---|---|
+| [MARK2_SEAMS.md](MARK2_SEAMS.md) | The Mark III readiness contract — seven named extension seams every workstream must land on | `warden/toolsource.py`, `warden/dispatch.py` (hook points), `gate/runner.py` (assembly), `model/factory.py`, `cell/factory.py`, `agents/` (prompt fragments) |
 | [MARK2_CONTEXT.md](MARK2_CONTEXT.md) | W1 token ledger · W2 compaction · W3 prompt caching · W4 chat continuity · W5 output pipeline · W6 repo-context discovery | `warden/ledger.py`, `warden/compaction.py`, `engine.py`, `anthropic_model.py`, `gate/protocol.py`, `cell/base.py`, `gate/runner.py` |
 | [MARK2_TOOLBELT.md](MARK2_TOOLBELT.md) | W7 grep/glob/ranged read · W8 background processes · W9 web tools · W10 task list · W11 explore sub-loop · W12 git discipline | `tools/search.py`, `tools/process.py`, `tools/web.py`, `tools/tasks.py`, `tools/explore.py`, `cell/base.py` + both cells |
 | [MARK2_TRUST.md](MARK2_TRUST.md) | W13 ask-decision + wire round-trip · W14 persistent allow-list · W15 Mark VI + Heartbreaker counterparts | `warden/permissions.py`, `warden/dispatch.py`, `gate/peer.py`, `gate/protocol.py`; Mark VI: `app/routers/agents.py`, `app/core/dispatch.py`; Heartbreaker: approval card |
@@ -80,6 +94,11 @@ interleave.
 
 ```
 Phase A  (endurance core — unblocks everything else)
+├─ W0  seam scaffolding           ~small   ToolProvider + EventFan + prompt
+│                                          composition + registry surfaces
+│                                          (MARK2_SEAMS) — behavior-neutral,
+│                                          lands first so every later
+│                                          workstream registers through it
 ├─ W16 transient retry            ~small   engine.py call-site wrap
 ├─ W1  token ledger               ~small   prerequisite of W2, W18
 ├─ W3  prompt caching             ~small   pure win, no dependencies
@@ -135,6 +154,13 @@ four" discipline):
    new suites (`test_ledger`, `test_compaction`, `test_search_tools`,
    `test_process_tools`, `test_ask_flow`, `test_retry`, `test_journal`);
    `python -m forge demo` still passes offline.
+7. **The seam proof.** A throwaway out-of-tree module (`examples/plugin_probe/`)
+   registers one tool via a second `ToolProvider`, one event sink, one prompt
+   fragment, and one no-op `ToolHook` — using only the public registration
+   surfaces, importing no core internals — and a demo job exercises all four.
+   If the probe needs anything beyond MARK2_SEAMS' surfaces, Mark II is not
+   done. (The probe is the Mark III plugin loader's proof-of-existence; it
+   stays in-tree as the living conformance test.)
 
 When all six hold: bump `pyproject.toml` version to `2.0.0`, update the README
 status badge (which already says Mark II — it stops being aspirational), and
@@ -151,4 +177,5 @@ tag `mark-ii`.
 | Background processes leak on job end | Process table is owned by the Cell; `close()` kills the table; DockerCell containers die with the container (TOOLBELT §2) |
 | Ask-round-trip deadlocks a job when Heartbreaker is closed | Hard 120 s timeout → auto-deny with a clear tool_result; the model adapts or finishes without it (TRUST §3) |
 | Journal replay double-executes side-effectful tools | Resume replays the **transcript**, never re-executes tools; the Cell workspace is already in its post-crash state, and the model is told so via a resume preamble (RESILIENCE §2) |
+| A workstream hard-wires past a seam under schedule pressure → Mark III forces the rewrite this plan exists to avoid | The seam probe (done-signal #7) fails CI the moment a capability is reachable only through core internals; MARK2_SEAMS amendment is the mandatory review path for any new seam |
 | Multi-repo blast radius (three repos in W13/W15) | Wire frames are versioned and additive; Mark VI ignores unknown frame types today (verified in `agents.py` router), so Forge can ship first, Mark VI second, Heartbreaker third |

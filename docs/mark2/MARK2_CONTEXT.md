@@ -28,7 +28,10 @@ class TokenLedger:
 
 **Where the numbers come from.** Anthropic's streamed final message carries
 `usage` (input_tokens, output_tokens, cache_creation_input_tokens,
-cache_read_input_tokens). The `Model` protocol grows one optional event:
+cache_read_input_tokens). The `Model` protocol grows one **optional** event —
+optional is a seam requirement ([MARK2_SEAMS.md](MARK2_SEAMS.md) Seam 5): a
+Mark III provider plugin that never yields usage must still work, with the
+ledger falling back to estimates:
 
 ```python
 @dataclass
@@ -228,14 +231,15 @@ forbids it.
    list).
 2. Cap at 20 000 chars (hard-truncate with a notice — a conventions file this
    large is the repo's problem).
-3. Append to the system prompt under a delimiter:
-   `\n\n═══ REPO CONVENTIONS ({filename}) — these govern all work in this
-   repository ═══\n{content}`.
+3. Contribute it as a `PromptFragment` (`source="repo:{filename}"`) through
+   Seam 7's `compose_system_prompt` — the composer renders the delimited
+   section (`═══ REPO CONVENTIONS ({filename}) ═══`); `run_job` never
+   concatenates prompt strings by hand.
 
-Appending to **system** (not a user message) means W3's cache breakpoint
-covers it — read once, cached for the whole job. No per-directory descent
-(Claude Code's nested-CLAUDE.md feature) in Mark II: repos in this fleet keep
-one root file; revisit only if a real repo needs it.
+Landing in the composed **system** prompt (not a user message) means W3's
+cache breakpoint covers it — read once, cached for the whole job. No
+per-directory descent (Claude Code's nested-CLAUDE.md feature) in Mark II:
+repos in this fleet keep one root file; revisit only if a real repo needs it.
 
 **Tests.** discovery order, cap, absence (no-op), and that the Cell can still
 read the file normally (no consumption side effects).

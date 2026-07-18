@@ -52,7 +52,12 @@ if decision.behavior == "ask":
 ```
 
 `ctx.oracle` is a new `PermissionOracle` on `ToolContext` — an interface with
-exactly one method. Two implementations:
+exactly one method, and the **canonical example of the seam discipline**
+([MARK2_SEAMS.md](MARK2_SEAMS.md) Seam 2): one protocol, multiple
+implementations, chosen at assembly. Mark III policy plugins slot in as
+decision middleware between chain steps 2 and 3 — with the standing law that
+plugins may tighten, never loosen: the bypass-immune gate stays terminal and
+non-pluggable forever. Two Mark II implementations:
 
 - **`AutoDenyOracle`** — returns denied immediately. Used for: standalone
   `serve` mode without an operator channel, the offline demo, tests, and as
