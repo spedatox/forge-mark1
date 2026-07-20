@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import os
 import shlex
 import uuid
 from pathlib import Path
@@ -24,6 +25,9 @@ from pathlib import Path
 from forge.cell.base import Cell, CellPolicy, CommandResult
 
 WORKDIR = "/workspace"
+# The Cell runs as this uid — never root, and never configurable, so a job can
+# not talk its way into a privileged container.
+CELL_UID = 1000
 
 
 class DockerError(RuntimeError):
@@ -68,7 +72,7 @@ class DockerCell(Cell):
             "--memory", f"{self.policy.memory_mb}m",
             "--cpus", str(self.policy.cpus),
             "--pids-limit", str(self.policy.pids_limit),
-            "--user", "1000:1000",              # non-root
+            "--user", f"{CELL_UID}:{CELL_UID}",  # non-root
             "--cap-drop", "ALL",
             "--security-opt", "no-new-privileges",
         ]
@@ -76,15 +80,61 @@ class DockerCell(Cell):
             args += ["--network", "none"]       # default posture: no outbound network (§8)
         if self.workspace_mount is not None:
             self.workspace_mount.mkdir(parents=True, exist_ok=True)
+            self._hand_mount_to_cell_user()
             args += ["--mount", f"type=bind,src={self.workspace_mount},dst={WORKDIR}"]
         args += [self.image, "sleep", "infinity"]
         code, _out, err = await self._docker(*args, timeout=60)
         if code != 0:
             raise DockerError(f"could not start Cell container: {err.decode('utf-8', 'replace')}")
-        # Ensure the workspace exists and is writable by the non-root user.
+        # Ensure the workspace exists and is writable by the non-root user. On a
+        # bind mount this can only fix an ephemeral (in-image) workdir: the
+        # container drops ALL capabilities, so even uid 0 has no CAP_CHOWN and
+        # this call cannot touch host-owned files. _hand_mount_to_cell_user did
+        # that part from outside, where the privilege actually exists.
         await self._docker("exec", "--user", "0:0", self.container,
-                           "sh", "-c", f"mkdir -p {WORKDIR} && chown 1000:1000 {WORKDIR}", timeout=15)
+                           "sh", "-c",
+                           f"mkdir -p {WORKDIR} && chown {CELL_UID}:{CELL_UID} {WORKDIR} 2>/dev/null || true",
+                           timeout=15)
+        # Fail loud rather than hand the Warden a Cell whose every write dies
+        # with EACCES halfway through a job (§9.5: assume the environment).
+        code, _o, _e = await self._docker(
+            "exec", self.container, "sh", "-c", f"test -w {WORKDIR}", timeout=15)
+        if code != 0:
+            await self.close()
+            raise DockerError(
+                f"Cell workspace {WORKDIR} is not writable by uid {CELL_UID}. "
+                f"Give {self.workspace_mount} to that uid, or make it group-writable "
+                f"for a group the uid belongs to."
+            )
         self._started = True
+
+    def _hand_mount_to_cell_user(self) -> None:
+        """Give the bind mount to the Cell's uid, from outside the container.
+
+        This has to happen here because it cannot happen in there: the Cell
+        drops every capability, so it holds no CAP_CHOWN even as uid 0 and a
+        root-owned bind mount stays unwritable no matter what the container
+        does to it. Best-effort by design — when the Forge is unprivileged this
+        is a no-op, and the writability probe in start() is what turns a
+        still-unusable workspace into a loud error instead of a job that fails
+        on its first write.
+
+        The group is deliberately left alone. On the deployed host it is the
+        vault's group, and that is what lets the file desktop manage the output
+        of a job it did not run.
+        """
+        chown = getattr(os, "chown", None)       # POSIX only; absent on Windows
+        if chown is None or self.workspace_mount is None:
+            return
+        try:
+            st = self.workspace_mount.stat()
+            if st.st_uid != CELL_UID:
+                chown(self.workspace_mount, CELL_UID, -1)
+            # Keep the group's access at least as wide as the owner's, so a
+            # shared vault group can still read and clean up what lands here.
+            os.chmod(self.workspace_mount, st.st_mode | 0o070)
+        except OSError:
+            return                               # unprivileged: start() will report it
 
     async def run(self, command: str, timeout: int | None = None,
                   env: dict[str, str] | None = None) -> CommandResult:
