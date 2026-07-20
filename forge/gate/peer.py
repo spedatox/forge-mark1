@@ -92,10 +92,26 @@ class ForgePeer:
                 logger.info("peer_registered",
                             extra={"agent": self.cfg.agent_id, "url": self.settings.speda_ws_url})
                 hb = asyncio.create_task(self._heartbeat())
+                # The receive loop parks on ws.recv() and only returns when the
+                # socket closes, so waiting on it alone leaves a stop request
+                # unobserved for as long as the connection stays healthy —
+                # under systemd that means SIGTERM is ignored until SIGKILL.
+                # Race the two instead: whichever lands first ends the session.
+                recv = asyncio.create_task(self._receive_loop())
+                stop = asyncio.create_task(self._stop.wait())
                 try:
-                    await self._receive_loop()
+                    done, _ = await asyncio.wait(
+                        {recv, stop}, return_when=asyncio.FIRST_COMPLETED
+                    )
+                    # Re-raise a connection failure so run_forever's backoff sees
+                    # it; a stop request is not an error and must not reconnect.
+                    if recv in done:
+                        recv.result()
                 finally:
                     hb.cancel()
+                    recv.cancel()
+                    stop.cancel()
+                    await asyncio.gather(hb, recv, stop, return_exceptions=True)
             finally:
                 self._ws = None
                 for ev in self._chats.values():

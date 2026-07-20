@@ -154,3 +154,61 @@ def test_engine_core_has_no_agent_identity_strings():
         text = (ENGINE_ROOT / rel).read_text(encoding="utf-8").lower()
         assert "optimus" not in text, f"'optimus' leaked into {rel}"
         assert "centurion" not in text, f"'centurion' leaked into {rel}"
+
+
+# ── §11 peer shuts down on request while a healthy connection is idle ────────
+class _IdleSocket:
+    """A connected socket that never delivers a frame — the steady state."""
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    async def send(self, _payload):
+        return None
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        await asyncio.Event().wait()        # parks forever, like ws.recv()
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_exc):
+        self.closed = True
+        return False
+
+
+def test_stop_request_ends_an_idle_connection(monkeypatch):
+    """A stop must be observed while connected, not only between reconnects.
+
+    Regression: run_forever checked the stop event only around _serve_one, so a
+    healthy idle socket kept the peer parked in ws.recv() and SIGTERM did
+    nothing until systemd escalated to SIGKILL 90s later.
+    """
+    import sys
+    import types
+
+    from forge.agents.registry import AgentRegistry
+    from forge.config import ForgeSettings
+    from forge.gate.peer import ForgePeer
+
+    sock = _IdleSocket()
+    fake = types.ModuleType("websockets")
+    fake.__version__ = "13.0"
+    fake.connect = lambda *_a, **_kw: sock
+    monkeypatch.setitem(sys.modules, "websockets", fake)
+
+    monkeypatch.setenv("SPEDA_API_KEY", "test-key")
+    registry = AgentRegistry.load()
+    peer = ForgePeer(registry.get("optimus"), ForgeSettings.from_env(), registry)
+
+    async def scenario():
+        runner = asyncio.create_task(peer.run_forever())
+        await asyncio.sleep(0.05)           # let it connect and register
+        peer.request_stop()                 # what the SIGTERM handler calls
+        await asyncio.wait_for(runner, timeout=2.0)
+
+    asyncio.run(scenario())                 # TimeoutError here = the bug is back
+    assert sock.closed, "the socket should be closed on the way out"
