@@ -1,0 +1,43 @@
+[Unit]
+Description=The Forge — Optimus execution peer for SPEDA Mark VI
+Documentation=https://github.com/spedatox/forge-mark1
+# Cells are throwaway Docker containers, so the daemon must be up first. The
+# peer itself tolerates SPEDA being down — it reconnects with capped backoff —
+# so there is deliberately no ordering against the compose stack.
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+# Don't hammer a genuinely broken config: five failures in a minute stops it.
+# These are [Unit] keys — systemd ignores them under [Service].
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/forge-mk1
+# forge/__main__.py reads os.environ directly and loads no .env file itself.
+EnvironmentFile=/opt/forge-mk1/.env
+ExecStart=/opt/forge-mk1/.venv/bin/python -m forge connect --agent optimus
+
+# Job output lands in the Hisar vault; 0002 keeps it group-writable so the web
+# desktop (uid 10001, gid 999) can manage what the Forge creates.
+UMask=0002
+
+Restart=always
+RestartSec=5s
+TimeoutStopSec=20s
+
+# Root is required for the Docker socket (that is how Cells are created).
+# What can be hardened without breaking that, is.
+NoNewPrivileges=true
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=forge
+
+[Install]
+WantedBy=multi-user.target
