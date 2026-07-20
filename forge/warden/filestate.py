@@ -39,6 +39,12 @@ class FileStateCache:
         while len(self._cache) > self._max:
             self._cache.popitem(last=False)
 
+    def clear(self) -> None:
+        """Forget every file. Called after compaction: the model's memory of file
+        contents is now a summary's, not a transcript's, so read-before-write
+        must make it look again rather than trust a read it can no longer see."""
+        self._cache.clear()
+
     def get(self, path: str) -> FileState | None:
         key = self._norm(path)
         st = self._cache.get(key)

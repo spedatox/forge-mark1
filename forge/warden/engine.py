@@ -20,6 +20,18 @@ from typing import Any, Awaitable, Callable
 
 from forge.model.base import Model, TextDelta, ToolUseRequest, UsageReport
 from forge.model.errors import ErrorClass, classify, retry_after
+from forge.warden.compaction import (
+    ELIDE_AFTER_CYCLES,
+    FORCED_CUT_KEEPS,
+    FORCED_ELIDE_KEEP,
+    KEEP_CYCLES,
+    MAX_COMPACT_FAILURES,
+    elide_old_tool_results,
+    find_cut,
+    rebuild,
+    render_for_summary,
+    summarize,
+)
 from forge.warden.dispatch import dispatch_tool, to_anthropic_tool_result
 from forge.warden.ledger import TokenLedger
 from forge.warden.results import enforce_batch_budget
@@ -116,6 +128,10 @@ class Warden:
                                       error=f"max_iterations ({self.max_iterations}) reached")
             state.iteration += 1
 
+            # ── Make room, before spending a turn discovering there is none. ──
+            if state.ledger.should_compact():
+                await self._compact(state)
+
             # ── Act: stream one model turn, collecting text + tool-use blocks. ─
             turn = await self._stream_turn(state, tool_schemas)
 
@@ -187,6 +203,82 @@ class Warden:
 
             state.advance(ContinueReason.NEXT_TURN)
 
+    # ── Making room ──────────────────────────────────────────────────────────
+    async def _compact(self, state: LoopState, forced: bool = False) -> bool:
+        """Reclaim context. True if anything was freed.
+
+        Cheap layer first: eliding old tool results costs no model call and
+        keeps the reasoning verbatim. Only if that leaves the window still over
+        the line does the transcript get summarized, because a summary is lossy
+        and granular history is worth keeping when it fits.
+
+        `forced` skips the after-elision threshold check: the caller is
+        recovering from a provider that has already refused the request, so
+        "probably enough" is not good enough."""
+        if state.compact_failures >= MAX_COMPACT_FAILURES:
+            logger.warning("compaction_disabled", extra={"failures": state.compact_failures})
+            return False
+
+        messages, freed = elide_old_tool_results(
+            state.messages, FORCED_ELIDE_KEEP if forced else ELIDE_AFTER_CYCLES)
+        if freed:
+            state.messages = messages
+            # The ledger's figure is from the last API call and cannot see this
+            # yet. Adjust provisionally so the next turn's threshold check
+            # reflects the reclaim; the next real UsageReport corrects it.
+            state.ledger.prompt_tokens = max(0, state.ledger.prompt_tokens - freed // 4)
+            await self.emit({"type": "compact",
+                             "data": {"stage": "elide", "freed_chars": freed}})
+            if not forced and not state.ledger.should_compact():
+                self._forget_files()             # the cheap layer was enough
+                return True
+
+        cut = None
+        for keep in (FORCED_CUT_KEEPS if forced else (KEEP_CYCLES,)):
+            cut = find_cut(state.messages, keep)
+            if cut is not None:
+                break
+        if cut is None:
+            # Nothing summarizable. Not a failure — a short transcript that is
+            # somehow too large has no structure to exploit, and saying so
+            # beats burning a model call to discover it.
+            logger.info("compaction_found_nothing_to_cut")
+            if freed:
+                self._forget_files()
+            return bool(freed)
+
+        await self.emit({"type": "compact", "data": {"stage": "summarize", "cut": cut}})
+        try:
+            summary = await summarize(
+                self.model, render_for_summary(state.messages[1:cut]), self.signal)
+        except Exception as e:  # noqa: BLE001 — a failed rescue must not be fatal
+            logger.warning("compaction_call_failed", extra={"error": repr(e)})
+            summary = None
+
+        if summary is None:
+            state.compact_failures += 1
+            if freed:
+                self._forget_files()
+            return bool(freed)
+
+        state.messages = rebuild(state.messages, cut, summary)
+        state.compact_failures = 0
+        self._forget_files()
+        await self.emit({"type": "compact",
+                         "data": {"stage": "done", "messages": len(state.messages)}})
+        return True
+
+    def _forget_files(self) -> None:
+        """Drop read-before-write grounding after any reclamation.
+
+        Not only after summarizing. Elision removes tool *results*, and a
+        `read_file` result is one — so the model can lose a file's contents
+        while the cache still reports "you have read this, you may edit it".
+        That combination permits a blind edit against remembered text the model
+        can no longer see. Any reclamation invalidates the grounding, so any
+        reclamation clears it and the next edit has to look again."""
+        self.ctx.files.clear()
+
     # ── Recovery: what to do about a turn that failed ────────────────────────
     async def _recover(self, error: Exception, state: LoopState) -> bool:
         """Decide whether the loop should try again. True means continue.
@@ -195,6 +287,17 @@ class Warden:
         nothing to undo: a retry re-sends exactly the prompt the failed attempt
         was given, and cannot duplicate text the operator already saw streamed."""
         kind = classify(error)
+
+        if kind is ErrorClass.RECOVERABLE:
+            # The window is full. The same request will fail identically forever,
+            # but a *smaller* request may not — so make one smaller and try
+            # again. This is the backstop for the proactive threshold above,
+            # which works off an estimate and can undershoot.
+            if not await self._compact(state, forced=True):
+                return False
+            state.advance(ContinueReason.RECOVERED_CONTEXT, type(error).__name__)
+            return True
+
         if kind is not ErrorClass.TRANSIENT:
             return False
         if state.retry_attempt >= self.retry_attempts:

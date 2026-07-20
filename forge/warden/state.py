@@ -37,6 +37,7 @@ class ContinueReason(str, enum.Enum):
     silent extra lap."""
     NEXT_TURN = "next_turn"          # tools executed, results appended, continue
     RETRY_TRANSIENT = "retry_transient"   # the stream failed in a way that may not recur
+    RECOVERED_CONTEXT = "recovered_context"   # the window was full; it was made smaller
 
 
 @dataclass(frozen=True)
@@ -61,6 +62,12 @@ class LoopState:
     of the job. Subtracted from the iteration budget: a retry is not work done,
     and charging it against the ceiling lets a flaky provider quietly shorten
     every job it touches. Never reset — the budget it protects is cumulative."""
+
+    compact_failures: int = 0
+    """Consecutive failed attempts to reclaim context. Past a small limit Forge
+    stops trying: a context that cannot be reduced will not become reducible on
+    the fourth attempt, and an unbounded compaction retry is a money fire rather
+    than a resilience feature."""
 
     retry_attempt: int = 0
     """*Consecutive* failed attempts at the current turn. Reset by any turn that
