@@ -47,6 +47,12 @@ class DockerCell(Cell):
         self.container = f"forge-cell-{name_hint}-{uuid.uuid4().hex[:8]}"
         self._started = False
 
+    @property
+    def host_path(self) -> "Path | None":
+        """The bind mount, when there is one. An ephemeral in-container
+        workspace has no host path and search reports itself unavailable."""
+        return self.workspace_mount
+
     async def _docker(self, *args: str, timeout: int | None = None,
                       stdin: bytes | None = None) -> tuple[int, bytes, bytes]:
         proc = await asyncio.create_subprocess_exec(

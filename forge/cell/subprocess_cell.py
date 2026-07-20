@@ -26,6 +26,10 @@ class SubprocessCell(Cell):
         self.workspace = Path(workspace).resolve()
         self.policy = policy
 
+    @property
+    def host_path(self) -> Path:
+        return self.workspace
+
     async def start(self) -> None:
         self.workspace.mkdir(parents=True, exist_ok=True)
 

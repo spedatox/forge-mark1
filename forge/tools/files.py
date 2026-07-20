@@ -18,17 +18,34 @@ def _hash(content: str) -> str:
 
 
 # ── read_file ────────────────────────────────────────────────────────────────
+DEFAULT_LINE_LIMIT = 2000
+
+FILE_UNCHANGED_STUB = (
+    "File unchanged since your last read. The contents from that earlier read are "
+    "still current — refer to them rather than re-reading."
+)
+
+
 class ReadFileArgs(BaseModel):
     path: str = Field(description="Workspace-relative path of the file to read.")
+    offset: int | None = Field(
+        default=None, ge=1,
+        description="1-based line to start from. Omit to start at the beginning.")
+    limit: int | None = Field(
+        default=None, ge=1,
+        description=f"How many lines to read. Defaults to {DEFAULT_LINE_LIMIT}.")
 
 
 class ReadFile(Tool):
     name = "read_file"
     description = (
-        "Read a UTF-8 text file from your sandbox workspace and return its contents. "
-        "Use this before editing a file — edits are rejected until you have read the "
-        "current version (read-before-write). This tool is read-only and safe to run "
-        "in parallel with other reads. It returns the full file text."
+        "Read a UTF-8 text file from your sandbox workspace. Use this before editing a "
+        "file — edits are rejected until you have read the current version "
+        "(read-before-write). Output is line-numbered, which is what makes edit_file's "
+        f"exact-match anchoring reliable and composes with grep's path:line output. Reads "
+        f"up to {DEFAULT_LINE_LIMIT} lines by default; pass offset and limit to read a "
+        "window of a larger file, so no file is ever too big to work with. Read-only and "
+        "safe to run in parallel."
     )
     Args = ReadFileArgs
     is_read_only = True
@@ -40,8 +57,45 @@ class ReadFile(Tool):
             content = await ctx.cell.read(args.path)
         except FileNotFoundError as e:
             return ToolResult(f"File not found: {args.path} ({e})", is_error=True)
-        ctx.files.record(args.path, content, _hash(content))
-        return ToolResult(content)
+
+        digest = _hash(content)
+        windowed = args.offset is not None or args.limit is not None
+
+        # A whole-file re-read of something unchanged is the single most common
+        # duplicate in a long transcript. The model already has this text; hand
+        # back a pointer instead of a second copy. Only valid when the earlier
+        # read showed everything — after a windowed read the model does not.
+        prior = ctx.files.get(args.path)
+        if not windowed and prior is not None and prior.mtime == digest and prior.shown_fully:
+            return ToolResult(FILE_UNCHANGED_STUB)
+
+        # Freshness always records the hash of the WHOLE file, even for a window:
+        # edit-grounding must cover the parts that were not shown, or an edit to
+        # an unseen region would sail through on a partial read.
+        ctx.files.record(args.path, content, digest, shown_fully=not windowed)
+
+        lines = content.splitlines()
+        if not lines:
+            return ToolResult(f"[{args.path} is empty]")
+
+        start = args.offset or 1
+        if start > len(lines):
+            return ToolResult(
+                f"offset {start} is past the end of {args.path} ({len(lines)} lines).",
+                is_error=True)
+        count = args.limit if args.limit is not None else DEFAULT_LINE_LIMIT
+        window = lines[start - 1:start - 1 + count]
+        end = start + len(window) - 1
+
+        width = len(str(end))
+        body = "\n".join(f"{n:>{width}}→ {text}"
+                         for n, text in enumerate(window, start=start))
+
+        remaining = len(lines) - end
+        if remaining > 0:
+            body += (f"\n\n…[{remaining} more line{'' if remaining == 1 else 's'}; "
+                     f"read from offset {end + 1} to continue]")
+        return ToolResult(body)
 
 
 # ── write_file ───────────────────────────────────────────────────────────────
@@ -82,8 +136,9 @@ class EditFile(Tool):
         "Make a targeted edit to a file by replacing an exact substring. You must have "
         "read the file first and it must not have changed since (read-before-write "
         "grounding), or the edit is rejected with an explanation. The old_string must "
-        "match exactly once so the edit is unambiguous. It is a mutating operation and "
-        "runs one at a time."
+        "match exactly once so the edit is unambiguous, and it must match the file's raw "
+        "text — strip the line-number prefix that read_file adds for display. It is a "
+        "mutating operation and runs one at a time."
     )
     Args = EditFileArgs
     is_read_only = False
