@@ -14,11 +14,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
 from forge.model.base import Model, TextDelta, ToolUseRequest
 from forge.warden.dispatch import dispatch_tool, to_anthropic_tool_result
-from forge.warden.state import LoopState, StopReason, Terminal
+from forge.warden.state import ContinueReason, LoopState, StopReason, Terminal
 from forge.warden.tool import Tool, ToolContext, ToolResult
 
 logger = logging.getLogger("forge.warden")
@@ -28,6 +29,27 @@ Emit = Callable[[dict[str, Any]], Awaitable[None]]
 # Ceiling on tools in flight at once. Bounds the Cell, not the model: the model may
 # ask for any number of parallel reads: this decides how many actually run together.
 MAX_TOOL_CONCURRENCY = 10
+
+
+@dataclass
+class _Turn:
+    """One model turn, collected in full before any of it reaches the transcript.
+
+    A turn that fails carries its exception here instead of raising, so the loop
+    body decides what to do about it at a single, named boundary."""
+    text: str = ""
+    tool_uses: list[ToolUseRequest] = field(default_factory=list)
+    error: Exception | None = None
+
+    def assistant_message(self) -> dict[str, Any]:
+        """Render the turn as one Anthropic assistant message. Empty turns still
+        get a text block — the API rejects empty content."""
+        content: list[dict[str, Any]] = []
+        if self.text:
+            content.append({"type": "text", "text": self.text})
+        content.extend({"type": "tool_use", "id": tu.id, "name": tu.name, "input": tu.input}
+                       for tu in self.tool_uses)
+        return {"role": "assistant", "content": content or [{"type": "text", "text": ""}]}
 
 
 async def _noop_emit(_event: dict[str, Any]) -> None:
@@ -74,56 +96,46 @@ class Warden:
             state.iteration += 1
 
             # ── Act: stream one model turn, collecting text + tool-use blocks. ─
-            assistant_content: list[dict[str, Any]] = []
-            tool_uses: list[ToolUseRequest] = []
-            text_buf: list[str] = []
-            try:
-                async for ev in self.model.stream(
-                    system=self.system_prompt,
-                    messages=state.messages,
-                    tools=tool_schemas,
-                    signal=self.signal,
-                ):
-                    if isinstance(ev, TextDelta):
-                        text_buf.append(ev.text)
-                        await self.emit({"type": "chunk", "data": ev.text})
-                    elif isinstance(ev, ToolUseRequest):
-                        tool_uses.append(ev)
-                        await self.emit({"type": "tool",
-                                         "data": {"id": ev.id, "name": ev.name, "input": ev.input}})
-            except Exception as e:  # noqa: BLE001 — surface loudly, don't degrade (§9.5)
-                logger.exception("model_stream_failed")
-                await self.emit({"type": "error", "data": f"model error: {e}"})
-                return self._terminal(StopReason.ERROR, state, error=f"{type(e).__name__}: {e}")
+            turn = await self._stream_turn(state, tool_schemas)
 
-            text = "".join(text_buf)
-            if text:
-                assistant_content.append({"type": "text", "text": text})
-                state.last_text = text
-            for tu in tool_uses:
-                assistant_content.append(
-                    {"type": "tool_use", "id": tu.id, "name": tu.name, "input": tu.input})
-            state.messages.append({"role": "assistant",
-                                   "content": assistant_content or [{"type": "text", "text": ""}]})
+            # ── Failure boundary ─────────────────────────────────────────────
+            # Every way a turn can fail arrives here, and nowhere else. That is
+            # the point of collecting the turn instead of inlining the stream:
+            # recovery (retry a transient, compact and re-attempt) is a decision
+            # made at one site over a discarded turn, not an except-block wrapped
+            # around half the loop body.
+            if turn.error is not None:
+                logger.error("model_stream_failed", exc_info=turn.error)
+                await self.emit({"type": "error", "data": f"model error: {turn.error}"})
+                return self._terminal(
+                    StopReason.ERROR, state,
+                    error=f"{type(turn.error).__name__}: {turn.error}")
+
+            # The turn is committed only now, once the stream has ended cleanly.
+            # A turn that failed was never appended, so discarding it needs no
+            # transcript surgery — and a retry cannot duplicate its text.
+            if turn.text:
+                state.last_text = turn.text
+            state.messages.append(turn.assistant_message())
 
             # ── Boundary 1: interrupt checked after the model responds (§3). ──
             if self.signal.is_set():
                 # Back-fill tool_results so the transcript stays well-formed even
                 # though we did not run the tools (study §4).
-                if tool_uses:
-                    state.messages.append(self._interrupted_results(tool_uses))
+                if turn.tool_uses:
+                    state.messages.append(self._interrupted_results(turn.tool_uses))
                 return self._aborted(state)
 
             # ── Stop condition: no tool-use blocks → the model is done (§3). ──
-            if not tool_uses:
-                await self.emit({"type": "done", "data": text})
+            if not turn.tool_uses:
+                await self.emit({"type": "done", "data": turn.text})
                 return self._terminal(StopReason.COMPLETED, state)
 
             # ── Observe: run the requested tools (parallel only where safe). ──
-            results = await self._run_tools(tool_uses)
+            results = await self._run_tools(turn.tool_uses)
             result_blocks = [to_anthropic_tool_result(tu.id, res)
-                             for tu, res in zip(tool_uses, results)]
-            for tu, res in zip(tool_uses, results):
+                             for tu, res in zip(turn.tool_uses, results)]
+            for tu, res in zip(turn.tool_uses, results):
                 await self.emit({"type": "tool_result",
                                  "data": {"tool_use_id": tu.id, "is_error": res.is_error,
                                           "content": res.content}})
@@ -132,7 +144,35 @@ class Warden:
             # ── Boundary 2: interrupt checked after tools execute (§3). ───────
             if self.signal.is_set():
                 return self._aborted(state)
-            # loop
+
+            state.advance(ContinueReason.NEXT_TURN)
+
+    # ── One model turn, collected but not yet committed ──────────────────────
+    async def _stream_turn(self, state: LoopState, tool_schemas: list[dict[str, Any]]) -> _Turn:
+        """Stream one turn into a `_Turn`, converting a stream failure into a
+        value rather than letting it unwind the loop. Deltas are emitted as they
+        arrive — the operator sees the partial text either way; what a failed turn
+        does not get is a place in the transcript."""
+        turn = _Turn()
+        text_buf: list[str] = []
+        try:
+            async for ev in self.model.stream(
+                system=self.system_prompt,
+                messages=state.messages,
+                tools=tool_schemas,
+                signal=self.signal,
+            ):
+                if isinstance(ev, TextDelta):
+                    text_buf.append(ev.text)
+                    await self.emit({"type": "chunk", "data": ev.text})
+                elif isinstance(ev, ToolUseRequest):
+                    turn.tool_uses.append(ev)
+                    await self.emit({"type": "tool",
+                                     "data": {"id": ev.id, "name": ev.name, "input": ev.input}})
+        except Exception as e:  # noqa: BLE001 — classified at the failure boundary
+            turn.error = e
+        turn.text = "".join(text_buf)
+        return turn
 
     # ── Tool execution: concurrency gated by declared safety (§4). ───────────
     async def _run_tools(self, tool_uses: list[ToolUseRequest]) -> list[ToolResult]:
@@ -195,4 +235,5 @@ class Warden:
 
     def _terminal(self, reason: StopReason, state: LoopState, error: str | None = None) -> Terminal:
         return Terminal(reason=reason, final_text=state.last_text,
-                        iterations=state.iteration, error=error, messages=state.messages)
+                        iterations=state.iteration, error=error, messages=state.messages,
+                        transitions=tuple(state.transitions))

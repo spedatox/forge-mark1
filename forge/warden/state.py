@@ -2,7 +2,15 @@
 
 All cross-iteration state lives in one mutable LoopState; the loop returns exactly
 one Terminal with an enumerated reason. No loop state is scattered across
-free-standing variables, and there is no second 'are we done' signal."""
+free-standing variables, and there is no second 'are we done' signal.
+
+The loop is a state machine, and both of its edges are named. `StopReason` closes
+the set of ways it can end; `ContinueReason` closes the set of ways it can go
+round again. The second half matters as much as the first: a loop whose only
+recovery vocabulary is 'it continued' cannot report what it recovered from, and
+cannot be tested for having recovered at all. Every `continue` site in the engine
+stamps a reason, and the stamps accumulate — so the journal, the post-mortem, and
+the test all read the same names."""
 from __future__ import annotations
 
 import enum
@@ -18,13 +26,43 @@ class StopReason(str, enum.Enum):
     ERROR = "error"                  # an unrecoverable failure; surfaced loudly (§9.5)
 
 
+class ContinueReason(str, enum.Enum):
+    """The complete, closed set of ways the loop goes round again.
+
+    Today there is one: the model asked for tools, they ran, take another turn.
+    Recovery paths (retry a transient stream failure, compact and re-attempt)
+    join this enum as they land, and each one is a distinct name rather than a
+    silent extra lap."""
+    NEXT_TURN = "next_turn"          # tools executed, results appended, continue
+
+
+@dataclass(frozen=True)
+class Transition:
+    """One trip around the loop, and why."""
+    reason: ContinueReason
+    detail: str = ""                 # free-form: which error, how many attempts
+
+
 @dataclass
 class LoopState:
     """The one mutable object threaded through the loop. Continue-sites append to
-    `messages` and bump `iteration`; nothing else carries state between turns."""
+    `messages`, bump `iteration`, and stamp a transition; nothing else carries
+    state between turns."""
     messages: list[dict[str, Any]]
     iteration: int = 0
     last_text: str = ""              # most recent assistant text, returned on COMPLETED
+    transitions: list[Transition] = field(default_factory=list)
+
+    @property
+    def transition(self) -> Transition | None:
+        """Why the previous iteration continued. None during the first."""
+        return self.transitions[-1] if self.transitions else None
+
+    def advance(self, reason: ContinueReason, detail: str = "") -> None:
+        """Record why the loop is about to go round again. The engine calls this
+        at every continue site — an unstamped lap is a bug, and the invariant is
+        cheap to assert because `iteration` and `len(transitions)` move together."""
+        self.transitions.append(Transition(reason, detail))
 
 
 @dataclass(frozen=True)
@@ -35,3 +73,4 @@ class Terminal:
     iterations: int = 0
     error: str | None = None         # real error text when reason == ERROR (fail loud)
     messages: list[dict[str, Any]] = field(default_factory=list)
+    transitions: tuple[Transition, ...] = ()   # the path taken, in order
