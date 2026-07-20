@@ -1,5 +1,5 @@
 [Unit]
-Description=The Forge — Optimus execution peer for SPEDA Mark VI
+Description=The Forge — %i execution peer for SPEDA Mark VI
 Documentation=https://github.com/spedatox/forge-mark1
 # Cells are throwaway Docker containers, so the daemon must be up first. The
 # peer itself tolerates SPEDA being down — it reconnects with capped backoff —
@@ -16,8 +16,20 @@ StartLimitBurst=5
 Type=simple
 WorkingDirectory=/opt/forge-mk1
 # forge/__main__.py reads os.environ directly and loads no .env file itself.
+# The per-agent file is optional (leading "-") and overrides the shared one —
+# that is the only way to vary FORGE_CELL_IMAGE per agent, since the image is
+# global settings rather than a profile field.
+# Igor's .env is the single source of truth for the shared credentials — the
+# provider keys and SPEDA_API_KEY are the same values, and duplicating them here
+# only created drift on rotation (and a missing OPENAI_API_KEY the first time a
+# model pin asked for one). Nothing is widened by this: the Forge runs as root
+# on this host and could always read that file.
+EnvironmentFile=/opt/speda/packages/igor/.env
 EnvironmentFile=/opt/forge-mk1/.env
-ExecStart=/opt/forge-mk1/.venv/bin/python -m forge connect --agent optimus
+EnvironmentFile=-/opt/forge-mk1/.env.%i
+# Last writer wins; this is where each peer's agent-specific URL comes from.
+Environment=SPEDA_WS_URL=ws://127.0.0.1:8000/agents/ws/%i
+ExecStart=/opt/forge-mk1/.venv/bin/python -m forge connect --agent %i
 
 # Job output lands in the Hisar vault; 0002 keeps it group-writable so the web
 # desktop (uid 10001, gid 999) can manage what the Forge creates.
@@ -37,7 +49,7 @@ ProtectControlGroups=true
 
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=forge
+SyslogIdentifier=forge-%i
 
 [Install]
 WantedBy=multi-user.target

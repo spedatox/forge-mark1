@@ -28,17 +28,31 @@ docker pull python:3.12-slim          # the Cell image
 
 ## 2. Configure
 
-`.env`, mode 600. `SPEDA_API_KEY` and `ANTHROPIC_API_KEY` are the same values
-Igor uses — copy them from `packages/igor/.env`, and rotate them in both places
-together.
+**Credentials are not duplicated here.** The provider keys and `SPEDA_API_KEY`
+are the same values Igor uses, so the unit loads Igor's `.env` first and this
+file second. Copying them instead produced exactly the failure you would expect:
+a model pin resolved to `openai:…` and the peer died with *"openai model
+requested but its API key is not set"*, because only the Anthropic key had been
+copied across. Nothing is widened by reading Igor's file — the Forge runs as
+root on the same host and could always read it.
+
+`/opt/forge-mk1/.env` therefore holds only Forge-specific settings, mode 600:
 
 ```ini
-ANTHROPIC_API_KEY=…
-SPEDA_API_KEY=…
-SPEDA_WS_URL=ws://127.0.0.1:8000/agents/ws/optimus
 FORGE_CELL_BACKEND=docker
 FORGE_CELL_IMAGE=python:3.12-slim
 FORGE_WORKSPACE_ROOT=/opt/hisar/vault/Forge/workspaces
+```
+
+`SPEDA_WS_URL` is not set here either — the unit derives it per agent.
+
+Per-agent overrides go in `.env.<agent>` (optional, loaded last). That is the
+only way to vary the Cell image per agent, since `FORGE_CELL_IMAGE` is global
+settings rather than a profile field:
+
+```ini
+# .env.centurion — its profile wants security tooling in the Cell
+FORGE_CELL_IMAGE=ghcr.io/…/forge-cell-security:latest
 ```
 
 The workspace root inside the Hisar vault is the whole of the placement plan's
@@ -64,11 +78,14 @@ workspace now fails loudly at startup instead of on its first write.
 
 ## 4. Service
 
+The unit is **templated on the agent id**, so each agent is one more instance
+rather than one more file:
+
 ```bash
-cp deploy/forge.service /etc/systemd/system/
+cp deploy/forge@.service /etc/systemd/system/
 systemctl daemon-reload
-systemctl enable --now forge
-journalctl -u forge -f          # expect: peer_registered
+systemctl enable --now forge@optimus forge@centurion
+journalctl -u 'forge@*' -f      # expect: peer_registered, once per agent
 ```
 
 `EnvironmentFile` is load-bearing: `forge/__main__.py` reads `os.environ`
@@ -77,9 +94,9 @@ directly and loads no `.env` itself.
 ## 5. Verify
 
 ```bash
-systemctl is-active forge                                   # active
-journalctl -u forge -n 5 | grep peer_registered
-curl -sS -H "X-API-Key: $SPEDA_API_KEY" localhost:8000/agents   # optimus: online
+systemctl is-active forge@optimus forge@centurion
+journalctl -u 'forge@*' -n 10 | grep peer_registered
+curl -sS -H "X-API-Key: $SPEDA_API_KEY" localhost:8000/agents   # both online
 ```
 
 A restart should take well under a second. If it takes 20s and the journal says
@@ -87,12 +104,26 @@ A restart should take well under a second. If it takes 20s and the journal says
 (the stop event went unobserved while the connection was healthy) and it is
 covered by `test_stop_request_ends_an_idle_connection`.
 
-## 6. Updating
+## 6. Agents
+
+| Agent | Cell network | Notes |
+|---|---|---|
+| `optimus` | **off** (`--network none`) | coding; the default posture |
+| `centurion` | **on** | recon and scanning need it — declared in its `profile.toml`, not in any env file |
+
+Centurion's cells reach the internet. That is deliberate and profile-declared,
+but it is the one agent whose sandbox is not network-isolated, so it is worth
+knowing before dispatching to it. Its profile also expects security tooling
+(nmap, nikto, …) in the Cell image; until one is built it shares Optimus's
+`python:3.12-slim`, which carries none of it — see the `.env.centurion` seam
+in §2.
+
+## 7. Updating
 
 There is no CI for this repo. After pushing:
 
 ```bash
 cd /opt/forge-mk1 && git fetch origin main && git reset --hard origin/main
 ./.venv/bin/pip install -e .        # only when dependencies changed
-systemctl restart forge
+systemctl restart forge@optimus forge@centurion
 ```
