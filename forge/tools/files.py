@@ -10,6 +10,7 @@ import hashlib
 
 from pydantic import BaseModel, Field
 
+from forge.warden.results import EXEMPT
 from forge.warden.tool import Tool, ToolContext, ToolResult
 
 
@@ -19,6 +20,7 @@ def _hash(content: str) -> str:
 
 # ── read_file ────────────────────────────────────────────────────────────────
 DEFAULT_LINE_LIMIT = 2000
+MAX_READ_CHARS = 100_000       # roughly 25k tokens: one read's share of a window
 
 FILE_UNCHANGED_STUB = (
     "File unchanged since your last read. The contents from that earlier read are "
@@ -50,7 +52,10 @@ class ReadFile(Tool):
     Args = ReadFileArgs
     is_read_only = True
     is_concurrency_safe = True
-    max_result_chars = 200_000     # a file is context the model asked for; spill only if huge
+    # Exempt from the result budget: spilling a read produces a file whose only
+    # use is to be read back, so the tool bounds itself instead — see the ceiling
+    # enforced in `call`, and offset/limit for working through a large file.
+    max_result_chars = EXEMPT
 
     async def call(self, args: ReadFileArgs, ctx: ToolContext) -> ToolResult:
         try:
@@ -90,6 +95,24 @@ class ReadFile(Tool):
         width = len(str(end))
         body = "\n".join(f"{n:>{width}}→ {text}"
                          for n, text in enumerate(window, start=start))
+
+        # Self-bounding. Refusing beats truncating here: a refusal costs ~100
+        # chars and the model retries with a narrower window, while a silent
+        # truncation costs the full ceiling in tokens AND hides that there was
+        # more. The exception is a single monstrous line — no smaller `limit`
+        # can help, so that one gets cut with the cut declared.
+        if len(body) > MAX_READ_CHARS:
+            if len(window) == 1:
+                return ToolResult(
+                    body[:MAX_READ_CHARS]
+                    + f"\n…[line {start} is {len(window[0])} chars; cut at "
+                      f"{MAX_READ_CHARS}]")
+            suggested = max(1, len(window) * MAX_READ_CHARS // len(body))
+            return ToolResult(
+                f"Lines {start}-{end} of {args.path} are {len(body)} chars, over the "
+                f"{MAX_READ_CHARS}-char ceiling for one read. Retry with a smaller "
+                f"window — about limit={suggested} — or grep for what you need.",
+                is_error=True)
 
         remaining = len(lines) - end
         if remaining > 0:

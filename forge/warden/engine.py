@@ -20,6 +20,7 @@ from typing import Any, Awaitable, Callable
 from forge.model.base import Model, TextDelta, ToolUseRequest, UsageReport
 from forge.warden.dispatch import dispatch_tool, to_anthropic_tool_result
 from forge.warden.ledger import TokenLedger
+from forge.warden.results import enforce_batch_budget
 from forge.warden.state import ContinueReason, LoopState, StopReason, Terminal
 from forge.warden.tool import Tool, ToolContext, ToolResult
 
@@ -149,6 +150,9 @@ class Warden:
 
             # ── Observe: run the requested tools (parallel only where safe). ──
             results = await self._run_tools(turn.tool_uses)
+            # Each result is already within its own cap; this is the batch as a
+            # whole, which no single-result cap can see.
+            results = await enforce_batch_budget(turn.tool_uses, results, self.tools, self.ctx)
             result_blocks = [to_anthropic_tool_result(tu.id, res)
                              for tu, res in zip(turn.tool_uses, results)]
             for tu, res in zip(turn.tool_uses, results):

@@ -14,6 +14,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from forge.warden.results import cap_result
 from forge.warden.tool import Tool, ToolContext, ToolResult
 
 logger = logging.getLogger("forge.warden")
@@ -55,24 +56,9 @@ async def dispatch_tool(
         logger.warning("tool_call_raised", extra={"tool": name, "error": repr(e)})
         return ToolResult(f"<tool_error>{type(e).__name__}: {e}</tool_error>", is_error=True)
 
-    # 5. Cap result size — spill oversize to disk (§4).
-    return await _cap_result(tool, name, result, ctx)
-
-
-async def _cap_result(tool: Tool, name: str, result: ToolResult, ctx: ToolContext) -> ToolResult:
-    limit = tool.max_result_chars
-    if len(result.content) <= limit:
-        return result
-    preview = result.content[:limit]
-    spill_path = f".forge_spill/{name}_{abs(hash(result.content)) & 0xFFFFFF:06x}.txt"
-    try:
-        await ctx.cell.write(spill_path, result.content)
-        note = (f"\n\n…[result truncated at {limit} chars; full "
-                f"{len(result.content)} chars written to {spill_path} in the Cell "
-                f"— read it there if you need the rest]")
-    except Exception:  # noqa: BLE001 — spilling is best-effort; truncation still bounds context
-        note = f"\n\n…[result truncated at {limit} of {len(result.content)} chars]"
-    return ToolResult(preview + note, is_error=result.is_error)
+    # 5. Cap result size — spill oversize to disk (§4). The batch-wide budget is
+    #    the engine's job, once every result in the turn is known.
+    return await cap_result(tool, name, result, ctx)
 
 
 def to_anthropic_tool_result(tool_use_id: str, result: ToolResult) -> dict[str, Any]:
