@@ -56,6 +56,10 @@ def _ctx() -> ToolContext:
 
 
 def _warden(model, **kwargs) -> Warden:
+    # Retries off: these tests are about how a failed turn is discarded, not
+    # about whether it is re-attempted. Leaving them on would make every failure
+    # case sit through a real backoff (see test_retry.py for that behaviour).
+    kwargs.setdefault("retry_attempts", 0)
     return Warden(system_prompt="", tools={"nudge": Nudge()}, model=model,
                   ctx=_ctx(), **kwargs)
 

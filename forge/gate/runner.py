@@ -117,6 +117,8 @@ async def run_job(
             signal=signal,
             ledger=TokenLedger(context_limit=settings.context_limit,
                                max_output_tokens=settings.max_tokens),
+            retry_attempts=settings.retry_attempts,
+            retry_base_delay=settings.retry_base_delay_s,
             emit=lambda ev: emit(JobEvent(job_id=request.job_id, type=ev["type"], data=ev.get("data"))),
         )
         terminal = await warden.run(request.task)

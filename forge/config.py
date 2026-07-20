@@ -16,11 +16,20 @@ def _env(name: str, default: str = "") -> str:
     return os.environ.get(name, default).strip()
 
 
-def _int(name: str, default: int) -> int:
+def _int(name: str, default: int, allow_zero: bool = False) -> int:
     """A malformed number falls back to the default rather than failing startup —
-    these are gauges and ceilings, and a typo should not take the peer down."""
+    these are gauges and ceilings, and a typo should not take the peer down.
+    `allow_zero` is for settings where nought is a real choice: retries off."""
     try:
         value = int(_env(name) or default)
+    except ValueError:
+        return default
+    return value if (value >= 0 if allow_zero else value > 0) else default
+
+
+def _float(name: str, default: float) -> float:
+    try:
+        value = float(_env(name) or default)
     except ValueError:
         return default
     return value if value > 0 else default
@@ -59,6 +68,10 @@ class ForgeSettings:
     context_limit: int = 200_000
     max_tokens: int = 16_384
 
+    # Consecutive re-attempts at one failed model turn, and the first backoff.
+    retry_attempts: int = 4
+    retry_base_delay_s: float = 2.0
+
     @classmethod
     def from_env(cls) -> "ForgeSettings":
         return cls(
@@ -77,4 +90,6 @@ class ForgeSettings:
             graphify_bin=_env("FORGE_GRAPHIFY_BIN"),
             context_limit=_int("FORGE_CONTEXT_LIMIT", 200_000),
             max_tokens=_int("FORGE_MAX_TOKENS", 16_384),
+            retry_attempts=_int("FORGE_RETRY_ATTEMPTS", 4, allow_zero=True),
+            retry_base_delay_s=_float("FORGE_RETRY_BASE_DELAY_S", 2.0),
         )

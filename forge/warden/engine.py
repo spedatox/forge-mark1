@@ -14,10 +14,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
 from forge.model.base import Model, TextDelta, ToolUseRequest, UsageReport
+from forge.model.errors import ErrorClass, classify, retry_after
 from forge.warden.dispatch import dispatch_tool, to_anthropic_tool_result
 from forge.warden.ledger import TokenLedger
 from forge.warden.results import enforce_batch_budget
@@ -31,6 +33,13 @@ Emit = Callable[[dict[str, Any]], Awaitable[None]]
 # Ceiling on tools in flight at once. Bounds the Cell, not the model: the model may
 # ask for any number of parallel reads: this decides how many actually run together.
 MAX_TOOL_CONCURRENCY = 10
+
+# Consecutive re-attempts at one failed turn, and the first backoff. Four
+# attempts at 2s doubling covers ~30s of provider trouble, which is the shape of
+# a 529 spike; past that it is an outage and failing loudly beats hanging on.
+RETRY_ATTEMPTS = 4
+RETRY_BASE_DELAY_S = 2.0
+_MAX_BACKOFF_S = 30.0
 
 
 @dataclass
@@ -75,6 +84,8 @@ class Warden:
         emit: Emit | None = None,
         max_tool_concurrency: int = MAX_TOOL_CONCURRENCY,
         ledger: TokenLedger | None = None,
+        retry_attempts: int = RETRY_ATTEMPTS,
+        retry_base_delay: float = RETRY_BASE_DELAY_S,
     ) -> None:
         self.system_prompt = system_prompt
         self.tools = tools
@@ -86,6 +97,8 @@ class Warden:
         self._tool_slots = asyncio.Semaphore(max_tool_concurrency)
         # Sized per job from the model's window; the default suits Anthropic.
         self.ledger = ledger or TokenLedger()
+        self.retry_attempts = retry_attempts
+        self.retry_base_delay = retry_base_delay
 
     async def run(self, task: str) -> Terminal:
         """Drive the loop for one job and return its single typed Terminal."""
@@ -94,7 +107,9 @@ class Warden:
 
         while True:
             # ── Budget boundary: the single iteration ceiling (§3). ──────────
-            if state.iteration >= self.max_iterations:
+            # Retry laps are excluded: the ceiling bounds work attempted, and a
+            # provider having a bad afternoon must not silently shorten the job.
+            if state.iteration - state.retries >= self.max_iterations:
                 await self.emit({"type": "error",
                                  "data": f"reached max_iterations ({self.max_iterations})"})
                 return self._terminal(StopReason.MAX_ITERATIONS, state,
@@ -111,11 +126,16 @@ class Warden:
             # made at one site over a discarded turn, not an except-block wrapped
             # around half the loop body.
             if turn.error is not None:
+                if await self._recover(turn.error, state):
+                    continue
                 logger.error("model_stream_failed", exc_info=turn.error)
                 await self.emit({"type": "error", "data": f"model error: {turn.error}"})
                 return self._terminal(
                     StopReason.ERROR, state,
                     error=f"{type(turn.error).__name__}: {turn.error}")
+
+            # The turn streamed cleanly; the bad patch, if there was one, is over.
+            state.retry_attempt = 0
 
             # Account for the turn before the transcript grows. `state.messages`
             # is still exactly what was sent, which is what the estimate has to
@@ -166,6 +186,62 @@ class Warden:
                 return self._aborted(state)
 
             state.advance(ContinueReason.NEXT_TURN)
+
+    # ── Recovery: what to do about a turn that failed ────────────────────────
+    async def _recover(self, error: Exception, state: LoopState) -> bool:
+        """Decide whether the loop should try again. True means continue.
+
+        The turn that failed was never committed to the transcript, so there is
+        nothing to undo: a retry re-sends exactly the prompt the failed attempt
+        was given, and cannot duplicate text the operator already saw streamed."""
+        kind = classify(error)
+        if kind is not ErrorClass.TRANSIENT:
+            return False
+        if state.retry_attempt >= self.retry_attempts:
+            logger.warning("retries_exhausted",
+                           extra={"attempts": state.retry_attempt, "error": repr(error)})
+            return False
+
+        state.retry_attempt += 1
+        state.retries += 1
+        delay = self._backoff_delay(state.retry_attempt, retry_after(error))
+        logger.info("model_stream_retry",
+                    extra={"attempt": state.retry_attempt, "delay_s": round(delay, 1),
+                           "error": repr(error)})
+        # The operator is watching a stream that just stopped mid-sentence. Say
+        # why, or the restart of the visible text looks like the model glitching.
+        await self.emit({"type": "chunk",
+                         "data": f"\n[connection lost — retrying in {delay:.0f}s "
+                                 f"(attempt {state.retry_attempt} of {self.retry_attempts})]\n"})
+
+        if not await self._sleep_unless_interrupted(delay):
+            return False        # aborted mid-backoff; fall through to terminate
+        state.advance(ContinueReason.RETRY_TRANSIENT,
+                      f"{type(error).__name__} (attempt {state.retry_attempt})")
+        return True
+
+    def _backoff_delay(self, attempt: int, hint: float | None) -> float:
+        """Exponential with jitter, capped. A server's own `retry-after` wins —
+        guessing 2 s against a 429 that asked for 30 just earns another 429.
+
+        Jitter matters more than it looks: without it, several agents that hit
+        the same rate limit retry in lockstep and re-collide indefinitely."""
+        if hint is not None:
+            return hint
+        delay = min(self.retry_base_delay * (2 ** (attempt - 1)), _MAX_BACKOFF_S)
+        return delay * random.uniform(0.75, 1.25)
+
+    async def _sleep_unless_interrupted(self, delay: float) -> bool:
+        """Sleep, but stay interruptible. Returns False if the operator aborted.
+
+        A plain sleep here would make an abort during a 30 s backoff feel like a
+        hang — the one moment the loop is doing nothing is the one moment it must
+        still be listening."""
+        try:
+            await asyncio.wait_for(self.signal.wait(), timeout=delay)
+        except (asyncio.TimeoutError, TimeoutError):
+            return True         # slept the full delay undisturbed
+        return False            # the signal fired
 
     # ── One model turn, collected but not yet committed ──────────────────────
     async def _stream_turn(self, state: LoopState, tool_schemas: list[dict[str, Any]]) -> _Turn:

@@ -36,6 +36,7 @@ class ContinueReason(str, enum.Enum):
     join this enum as they land, and each one is a distinct name rather than a
     silent extra lap."""
     NEXT_TURN = "next_turn"          # tools executed, results appended, continue
+    RETRY_TRANSIENT = "retry_transient"   # the stream failed in a way that may not recur
 
 
 @dataclass(frozen=True)
@@ -55,6 +56,17 @@ class LoopState:
     last_text: str = ""              # most recent assistant text, returned on COMPLETED
     transitions: list[Transition] = field(default_factory=list)
     ledger: TokenLedger = field(default_factory=TokenLedger)
+    retries: int = 0
+    """Total laps spent re-attempting rather than progressing, for the lifetime
+    of the job. Subtracted from the iteration budget: a retry is not work done,
+    and charging it against the ceiling lets a flaky provider quietly shorten
+    every job it touches. Never reset — the budget it protects is cumulative."""
+
+    retry_attempt: int = 0
+    """*Consecutive* failed attempts at the current turn. Reset by any turn that
+    streams cleanly, so the attempt limit bounds one bad patch rather than a
+    job's lifetime total — six separate blips over an hour are six recoveries,
+    not an exhausted budget."""
 
     @property
     def transition(self) -> Transition | None:
