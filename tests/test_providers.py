@@ -139,3 +139,127 @@ def test_streaming_yields_text_then_tool_use(monkeypatch):
     assert len(tools) == 1
     assert tools[0].name == "run_command"
     assert tools[0].input == {"command": "ls"}   # streamed JSON fragments reassembled
+
+
+# ── gpt-5.6+ tool calls route to /v1/responses ───────────────────────────────
+def test_responses_api_gate():
+    from forge.model.providers import (_openai_tools_need_responses_api,
+                                       _use_responses_api)
+
+    # 5.6 and newer need it; the older gpt-5 generation does not.
+    assert _openai_tools_need_responses_api("gpt-5.6-terra")
+    assert _openai_tools_need_responses_api("gpt-5.6-luna")
+    assert _openai_tools_need_responses_api("gpt-6.0")       # future releases too
+    assert not _openai_tools_need_responses_api("gpt-5.1")
+    assert not _openai_tools_need_responses_api("gpt-5-mini")
+    assert not _openai_tools_need_responses_api("gpt-4o")
+
+    tools = [{"name": "run_command", "input_schema": {"type": "object"}}]
+    assert _use_responses_api("openai", "gpt-5.6-terra", tools)
+    # Tool-free calls stay on chat-completions — that endpoint works fine there.
+    assert not _use_responses_api("openai", "gpt-5.6-terra", [])
+    # Only OpenAI: another provider's model must never be rerouted.
+    assert not _use_responses_api("zai", "glm-4.6", tools)
+
+
+def test_to_responses_params_shape():
+    from forge.model.providers import _to_responses_params
+
+    messages = [
+        {"role": "user", "content": "list the files"},
+        {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "call_1", "name": "run_command",
+             "input": {"command": "ls"}}]},
+        {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "call_1", "content": "a.py"}]},
+    ]
+    tools = [{"name": "run_command", "description": "run", "input_schema": {"type": "object"}}]
+    p = _to_responses_params("gpt-5.6-terra", "be terse", messages, tools, 4096)
+
+    # System prompt rides `instructions`, not a message.
+    assert p["instructions"] == "be terse"
+    assert p["max_output_tokens"] == 4096          # not max_tokens
+    # Tools are declared flat — no {"type":"function","function":{…}} envelope.
+    assert p["tools"][0]["name"] == "run_command"
+    assert "function" not in p["tools"][0]
+    # Reasoning is native here; sending an effort override is what broke tools.
+    assert "reasoning" not in p and "reasoning_effort" not in p
+
+    kinds = [i.get("type") or i.get("role") for i in p["input"]]
+    assert kinds == ["user", "function_call", "function_call_output"]
+    call = p["input"][1]
+    out = p["input"][2]
+    # call_id is the pairing handle on both sides.
+    assert call["call_id"] == out["call_id"] == "call_1"
+    assert call["arguments"] == '{"command": "ls"}'
+    assert out["output"] == "a.py"
+
+
+def test_responses_stream_yields_text_then_tool_use():
+    """The /v1/responses event shape must produce the same events as chat."""
+    events = [
+        types.SimpleNamespace(type="response.output_text.delta", delta="Look"),
+        types.SimpleNamespace(type="response.output_text.delta", delta="ing"),
+        types.SimpleNamespace(
+            type="response.output_item.added", output_index=0,
+            item=types.SimpleNamespace(type="function_call", call_id="call_9",
+                                       name="run_command", arguments="")),
+        types.SimpleNamespace(type="response.function_call_arguments.delta",
+                              output_index=0, delta='{"command":'),
+        types.SimpleNamespace(type="response.function_call_arguments.delta",
+                              output_index=0, delta=' "ls -la"}'),
+        types.SimpleNamespace(type="response.completed", response=None),
+    ]
+
+    class FakeStream:
+        def __aiter__(self):
+            async def gen():
+                for e in events:
+                    yield e
+            return gen()
+        async def close(self): ...
+
+    class FakeResponses:
+        def __init__(self): self.params = None
+        async def create(self, **kwargs):
+            assert kwargs.get("stream") is True
+            self.params = kwargs
+            return FakeStream()
+
+    fake_responses = FakeResponses()
+
+    class FakeClient:
+        responses = fake_responses
+        # Present but must stay untouched: routing the call here is the point.
+        chat = types.SimpleNamespace(completions=types.SimpleNamespace(
+            create=_unreachable))
+
+    class S:
+        openai_api_key = "sk"
+        gemini_api_key = zai_api_key = deepseek_api_key = ""
+        ollama_base_url = "x"
+
+    model = OpenAICompatModel("openai", "gpt-5.6-terra", S())
+    model._client = FakeClient()
+
+    async def collect():
+        out = []
+        async for ev in model.stream(
+                system="s", messages=[{"role": "user", "content": "hi"}],
+                tools=[{"name": "run_command", "input_schema": {"type": "object"}}],
+                signal=asyncio.Event()):
+            out.append(ev)
+        return out
+
+    got = asyncio.run(collect())
+    assert "".join(e.text for e in got if isinstance(e, TextDelta)) == "Looking"
+    calls = [e for e in got if isinstance(e, ToolUseRequest)]
+    assert len(calls) == 1
+    assert calls[0].id == "call_9"          # call_id, not item.id
+    assert calls[0].name == "run_command"
+    assert calls[0].input == {"command": "ls -la"}
+    assert fake_responses.params["model"] == "gpt-5.6-terra"
+
+
+async def _unreachable(**_kwargs):          # pragma: no cover - guard only
+    raise AssertionError("gpt-5.6 tool calls must not hit chat.completions")

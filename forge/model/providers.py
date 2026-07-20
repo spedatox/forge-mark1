@@ -49,6 +49,48 @@ _FINISH_TO_STOP = {"stop": "end_turn", "tool_calls": "tool_use",
                    "function_call": "tool_use", "length": "max_tokens"}
 
 
+# OpenAI reasoning models whose function tools must go to /v1/responses rather
+# than /v1/chat/completions. Named releases first, then a version-number match so
+# future ones (5.7, 6.x, …) are covered without another edit here.
+_GPT56_CODENAMES = ("terra", "luna", "sol")
+
+
+def _openai_tools_need_responses_api(model_l: str) -> bool:
+    """True for gpt-5.6-and-newer OpenAI models, whose tools need /v1/responses.
+
+    During the 5.6 preview, chat-completions accepted tools as long as
+    reasoning_effort was forced to 'none'. After the July 9 2026 GA that stopped
+    being reliable: the same key/model/payload fails roughly every other call
+    with a misleading 401 "insufficient permissions" (luna) or a clean 400
+    (sol/terra), then succeeds on retry. OpenAI's own error text names the fix —
+    "To use function tools, use /v1/responses" — so we route there instead of
+    reintroducing the reasoning_effort hack. Mark VI reached the same conclusion
+    the same way; this mirrors its llm_client so a turn behaves identically
+    whether it runs in-process there or out here.
+
+    The older gpt-5 generation (gpt-5 / mini / nano) is unaffected and stays on
+    chat-completions.
+    """
+    import re
+
+    if any(c in model_l for c in _GPT56_CODENAMES):
+        return True
+    m = re.search(r"gpt-(\d+(?:\.\d+)?)", model_l)
+    if m:
+        try:
+            return float(m.group(1)) >= 5.6
+        except ValueError:
+            return False
+    return False
+
+
+def _use_responses_api(provider: str, model: str, tools: list[dict[str, Any]] | None) -> bool:
+    """Whether this specific call must use /v1/responses. Only ever true for
+    OpenAI + a 5.6-family model + tools in the request. Tool-free calls work
+    fine on chat-completions and stay there, so nothing else moves."""
+    return bool(tools) and provider == "openai" and _openai_tools_need_responses_api(model.lower())
+
+
 def parse_model_ref(ref: str) -> tuple[str, str]:
     """Split ``provider:model`` → (provider, model). Bare names are Anthropic.
     Only the first segment is matched, so Ollama tags like ``llama3.1:8b`` survive
@@ -81,6 +123,11 @@ class OpenAICompatModel:
     async def stream(self, *, system: str, messages: list[dict[str, Any]],
                      tools: list[dict[str, Any]], signal: asyncio.Event
                      ) -> AsyncIterator[TextDelta | ToolUseRequest]:
+        if _use_responses_api(self.provider, self.model_id, tools):
+            async for item in self._stream_responses(system, messages, tools, signal):
+                yield item
+            return
+
         params = _to_openai_params(self.provider, self.model_id, system, messages,
                                    tools, self.max_tokens)
         raw = await self._client.chat.completions.create(**params, stream=True)
@@ -111,6 +158,54 @@ class OpenAICompatModel:
             return
         for idx in sorted(acc):
             slot = acc[idx]
+            yield ToolUseRequest(id=slot["id"] or _gen_tool_id(),
+                                 name=slot["name"],
+                                 input=_parse_tool_args(slot["arguments"], slot["name"]))
+
+    async def _stream_responses(self, system: str, messages: list[dict[str, Any]],
+                                tools: list[dict[str, Any]], signal: asyncio.Event
+                                ) -> AsyncIterator[TextDelta | ToolUseRequest]:
+        """The /v1/responses path, yielding exactly what the caller above does.
+
+        The event shape is different from chat-completions: text arrives as
+        `response.output_text.delta`, and a function call arrives as an
+        `output_item.added` item carrying its call_id and name, followed by its
+        arguments JSON in deltas keyed by the same output_index.
+        """
+        params = _to_responses_params(self.model_id, system, messages, tools, self.max_tokens)
+        raw = await self._client.responses.create(**params, stream=True)
+        # output_index → accumulating call.
+        calls: dict[int, dict[str, str]] = {}
+        try:
+            async for event in raw:
+                if signal.is_set():
+                    break
+                etype = getattr(event, "type", "")
+                if etype == "response.output_text.delta":
+                    delta = getattr(event, "delta", "") or ""
+                    if delta:
+                        yield TextDelta(delta)
+                elif etype == "response.output_item.added":
+                    item = getattr(event, "item", None)
+                    if item is not None and getattr(item, "type", None) == "function_call":
+                        calls[getattr(event, "output_index", len(calls))] = {
+                            # call_id is the handle the API pairs
+                            # function_call_output against — item.id is a
+                            # different, unusable identifier.
+                            "id": getattr(item, "call_id", "") or "",
+                            "name": getattr(item, "name", "") or "",
+                            "arguments": getattr(item, "arguments", "") or "",
+                        }
+                elif etype == "response.function_call_arguments.delta":
+                    slot = calls.setdefault(getattr(event, "output_index", 0),
+                                            {"id": "", "name": "", "arguments": ""})
+                    slot["arguments"] += getattr(event, "delta", "") or ""
+        finally:
+            await raw.close()
+        if signal.is_set():
+            return
+        for idx in sorted(calls):
+            slot = calls[idx]
             yield ToolUseRequest(id=slot["id"] or _gen_tool_id(),
                                  name=slot["name"],
                                  input=_parse_tool_args(slot["arguments"], slot["name"]))
@@ -147,6 +242,84 @@ def _to_openai_params(provider: str, model: str, system: str,
     if provider == "deepseek" and tools:
         params["extra_body"] = {"thinking": {"type": "disabled"}}
     return params
+
+
+def _to_responses_params(model: str, system: str, messages: list[dict[str, Any]],
+                         tools: list[dict[str, Any]], max_tokens: int) -> dict[str, Any]:
+    """Request body for /v1/responses.
+
+    Differs from chat-completions in every structural way that matters: history
+    is a flat `input` item list rather than role messages, tool calls are
+    top-level `function_call` items paired with `function_call_output` by
+    `call_id` (not nested in messages), tool declarations are flat (no
+    {"type":"function","function":{…}} envelope), the system prompt rides
+    `instructions`, and the budget parameter is `max_output_tokens`.
+    """
+    items: list[dict[str, Any]] = []
+    for m in messages:
+        items.extend(_translate_message_responses(m))
+
+    params: dict[str, Any] = {"model": model, "input": items}
+    if system:
+        params["instructions"] = system
+    if tools:
+        params["tools"] = [{
+            "type": "function",
+            "name": t["name"],
+            "description": t.get("description", ""),
+            "parameters": t.get("input_schema", {"type": "object"}),
+        } for t in tools]
+    if max_tokens:
+        params["max_output_tokens"] = max_tokens
+    # Reasoning is native here and needs no override for tools to work, which is
+    # the whole reason this endpoint exists for us — so nothing is sent.
+    return params
+
+
+def _translate_message_responses(message: dict[str, Any]) -> list[dict[str, Any]]:
+    """One Anthropic-format message → one or more Responses API input items.
+
+    tool_result blocks become standalone `function_call_output` items emitted
+    before the user text they arrive with, mirroring _translate_message's
+    ordering so a call stays adjacent to its output.
+    """
+    role = message["role"]
+    content = message.get("content")
+    if isinstance(content, str):
+        ctype = "output_text" if role == "assistant" else "input_text"
+        return [{"role": role, "content": [{"type": ctype, "text": content}]}]
+
+    outputs: list[dict[str, Any]] = []
+    calls: list[dict[str, Any]] = []
+    parts: list[dict[str, Any]] = []
+
+    for block in content or []:
+        btype = block.get("type")
+        if btype == "text":
+            parts.append({"type": "output_text" if role == "assistant" else "input_text",
+                          "text": block.get("text", "")})
+        elif btype == "tool_use":
+            calls.append({"type": "function_call", "call_id": block["id"],
+                          "name": block["name"],
+                          "arguments": json.dumps(block.get("input") or {})})
+        elif btype == "tool_result":
+            rc = block.get("content", "")
+            if isinstance(rc, list):
+                rc = "\n".join(p.get("text", "") for p in rc if isinstance(p, dict))
+            outputs.append({"type": "function_call_output",
+                            "call_id": block.get("tool_use_id", ""),
+                            "output": rc if isinstance(rc, str) else str(rc)})
+
+    out: list[dict[str, Any]] = []
+    if role == "assistant":
+        if parts:
+            out.append({"role": "assistant", "content": parts})
+        out.extend(calls)
+    else:
+        out.extend(outputs)
+        if parts:
+            out.append({"role": role, "content": parts})
+    return out
 
 
 def _translate_message(message: dict[str, Any]) -> list[dict[str, Any]]:
