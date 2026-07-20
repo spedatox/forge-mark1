@@ -17,6 +17,8 @@ import enum
 from dataclasses import dataclass, field
 from typing import Any
 
+from forge.warden.ledger import TokenLedger
+
 
 class StopReason(str, enum.Enum):
     """The complete, closed set of ways the loop can end (§3)."""
@@ -52,6 +54,7 @@ class LoopState:
     iteration: int = 0
     last_text: str = ""              # most recent assistant text, returned on COMPLETED
     transitions: list[Transition] = field(default_factory=list)
+    ledger: TokenLedger = field(default_factory=TokenLedger)
 
     @property
     def transition(self) -> Transition | None:
@@ -74,3 +77,4 @@ class Terminal:
     error: str | None = None         # real error text when reason == ERROR (fail loud)
     messages: list[dict[str, Any]] = field(default_factory=list)
     transitions: tuple[Transition, ...] = ()   # the path taken, in order
+    usage: dict[str, Any] = field(default_factory=dict)   # the ledger's closing snapshot

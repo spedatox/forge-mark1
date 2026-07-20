@@ -16,6 +16,16 @@ def _env(name: str, default: str = "") -> str:
     return os.environ.get(name, default).strip()
 
 
+def _int(name: str, default: int) -> int:
+    """A malformed number falls back to the default rather than failing startup —
+    these are gauges and ceilings, and a typo should not take the peer down."""
+    try:
+        value = int(_env(name) or default)
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
 @dataclass(frozen=True)
 class ForgeSettings:
     # LLM — multi-provider, routed by the profile's "provider:model" ref
@@ -42,6 +52,13 @@ class ForgeSettings:
     # Graphify
     graphify_bin: str = ""              # blank → resolve "graphify" from PATH
 
+    # Context accounting. The window is the model's; max_tokens is what one turn
+    # may produce, and doubles as the reserve the ledger keeps for a compaction
+    # call. Both are per-model facts with fleet-wide defaults, overridable for a
+    # small local model whose window is nothing like 200 K.
+    context_limit: int = 200_000
+    max_tokens: int = 16_384
+
     @classmethod
     def from_env(cls) -> "ForgeSettings":
         return cls(
@@ -58,4 +75,6 @@ class ForgeSettings:
             workspace_root=Path(_env("FORGE_WORKSPACE_ROOT", "./.forge/workspaces")).resolve(),
             cell_image=_env("FORGE_CELL_IMAGE", "python:3.12-slim"),
             graphify_bin=_env("FORGE_GRAPHIFY_BIN"),
+            context_limit=_int("FORGE_CONTEXT_LIMIT", 200_000),
+            max_tokens=_int("FORGE_MAX_TOKENS", 16_384),
         )

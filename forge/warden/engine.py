@@ -17,8 +17,9 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
-from forge.model.base import Model, TextDelta, ToolUseRequest
+from forge.model.base import Model, TextDelta, ToolUseRequest, UsageReport
 from forge.warden.dispatch import dispatch_tool, to_anthropic_tool_result
+from forge.warden.ledger import TokenLedger
 from forge.warden.state import ContinueReason, LoopState, StopReason, Terminal
 from forge.warden.tool import Tool, ToolContext, ToolResult
 
@@ -39,6 +40,7 @@ class _Turn:
     body decides what to do about it at a single, named boundary."""
     text: str = ""
     tool_uses: list[ToolUseRequest] = field(default_factory=list)
+    usage: UsageReport | None = None
     error: Exception | None = None
 
     def assistant_message(self) -> dict[str, Any]:
@@ -71,6 +73,7 @@ class Warden:
         signal: asyncio.Event | None = None,
         emit: Emit | None = None,
         max_tool_concurrency: int = MAX_TOOL_CONCURRENCY,
+        ledger: TokenLedger | None = None,
     ) -> None:
         self.system_prompt = system_prompt
         self.tools = tools
@@ -80,10 +83,12 @@ class Warden:
         self.signal = signal or asyncio.Event()
         self.emit = emit or _noop_emit
         self._tool_slots = asyncio.Semaphore(max_tool_concurrency)
+        # Sized per job from the model's window; the default suits Anthropic.
+        self.ledger = ledger or TokenLedger()
 
     async def run(self, task: str) -> Terminal:
         """Drive the loop for one job and return its single typed Terminal."""
-        state = LoopState(messages=[{"role": "user", "content": task}])
+        state = LoopState(messages=[{"role": "user", "content": task}], ledger=self.ledger)
         tool_schemas = [t.schema() for t in self.tools.values()]
 
         while True:
@@ -110,6 +115,17 @@ class Warden:
                 return self._terminal(
                     StopReason.ERROR, state,
                     error=f"{type(turn.error).__name__}: {turn.error}")
+
+            # Account for the turn before the transcript grows. `state.messages`
+            # is still exactly what was sent, which is what the estimate has to
+            # measure when a provider reports nothing.
+            if turn.usage is not None:
+                state.ledger.record(turn.usage)
+            else:
+                state.ledger.estimate(self.system_prompt, state.messages)
+            await self.emit({"type": "usage",
+                             "data": {**state.ledger.snapshot(),
+                                      "iteration": state.iteration}})
 
             # The turn is committed only now, once the stream has ended cleanly.
             # A turn that failed was never appended, so discarding it needs no
@@ -169,6 +185,8 @@ class Warden:
                     turn.tool_uses.append(ev)
                     await self.emit({"type": "tool",
                                      "data": {"id": ev.id, "name": ev.name, "input": ev.input}})
+                elif isinstance(ev, UsageReport):
+                    turn.usage = ev
         except Exception as e:  # noqa: BLE001 — classified at the failure boundary
             turn.error = e
         turn.text = "".join(text_buf)
@@ -236,4 +254,5 @@ class Warden:
     def _terminal(self, reason: StopReason, state: LoopState, error: str | None = None) -> Terminal:
         return Terminal(reason=reason, final_text=state.last_text,
                         iterations=state.iteration, error=error, messages=state.messages,
-                        transitions=tuple(state.transitions))
+                        transitions=tuple(state.transitions),
+                        usage=state.ledger.snapshot())

@@ -23,6 +23,7 @@ from forge.model.base import Model
 from forge.tools import ALL_TOOLS
 from forge.warden.engine import Warden
 from forge.warden.filestate import FileStateCache
+from forge.warden.ledger import TokenLedger
 from forge.warden.permissions import AllowList, Mode, PermissionEngine
 from forge.warden.state import StopReason, Terminal
 from forge.warden.tool import ToolContext
@@ -89,7 +90,10 @@ async def run_job(
         # job; None means "use the profile's model_ref" (Rule 10: model IDs
         # live only in profiles, and the override is a profile-level concept).
         model_ref = request.model_override or cfg.model_ref
-        model = model or _build_model(model_ref, settings)
+        # One number: what a turn may produce is also what the ledger holds back
+        # for the compaction call. If these drifted apart, compaction would
+        # trigger with either too little room to finish or more than it needs.
+        model = model or _build_model(model_ref, settings, settings.max_tokens)
 
         tools = {name: ALL_TOOLS[name]() for name in cfg.tool_names}
         ctx = ToolContext(
@@ -111,6 +115,8 @@ async def run_job(
             ctx=ctx,
             max_iterations=max_iterations,
             signal=signal,
+            ledger=TokenLedger(context_limit=settings.context_limit,
+                               max_output_tokens=settings.max_tokens),
             emit=lambda ev: emit(JobEvent(job_id=request.job_id, type=ev["type"], data=ev.get("data"))),
         )
         terminal = await warden.run(request.task)
@@ -126,10 +132,10 @@ async def run_job(
             await cell.close()
 
 
-def _build_model(model_ref: str, settings: ForgeSettings) -> Model:
+def _build_model(model_ref: str, settings: ForgeSettings, max_tokens: int) -> Model:
     """Construct the model from a ``provider:model`` ref via the multi-provider
     factory (Anthropic / OpenAI / Gemini / z.ai / DeepSeek / Ollama).  The ref
     is either the agent profile's default or a per-job override from Heartbreaker's
     model picker.  A missing key for the selected provider fails loud."""
     from forge.model.factory import build_model
-    return build_model(model_ref, settings)
+    return build_model(model_ref, settings, max_tokens=max_tokens)
