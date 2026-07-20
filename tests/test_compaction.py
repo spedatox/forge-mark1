@@ -168,8 +168,8 @@ class Probe(Tool):
     name = "probe"
     description = "returns bulk output"
     Args = ProbeArgs
-    is_read_only = True
-    is_concurrency_safe = True
+    READ_ONLY = True
+    CONCURRENCY_SAFE = True
 
     async def call(self, args: ProbeArgs, ctx: ToolContext) -> ToolResult:
         return ToolResult("payload " * 500)

@@ -26,8 +26,8 @@ class Echo(Tool):
     name = "echo"
     description = "echo the input text"
     Args = EchoArgs
-    is_read_only = True
-    is_concurrency_safe = True
+    READ_ONLY = True
+    CONCURRENCY_SAFE = True
 
     async def call(self, args: EchoArgs, ctx: ToolContext) -> ToolResult:
         return ToolResult(args.text)

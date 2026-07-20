@@ -35,8 +35,8 @@ class See(Tool):
     name = "see"
     description = "record what the journal looks like right now"
     Args = SeeArgs
-    is_read_only = True
-    is_concurrency_safe = True
+    READ_ONLY = True
+    CONCURRENCY_SAFE = True
 
     def __init__(self, journal: _Journal, gate: asyncio.Barrier | None = None) -> None:
         self.journal = journal

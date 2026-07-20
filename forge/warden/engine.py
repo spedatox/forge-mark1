@@ -405,15 +405,28 @@ class Warden:
         """Group the batch into maximal runs of consecutive concurrency-safe calls."""
         groups: list[tuple[bool, list[ToolUseRequest]]] = []
         for tu in tool_uses:
-            tool = self.tools.get(tu.name)
-            # Fail closed (§4): an unknown tool is not assumed parallel-safe. It
-            # will resolve to an is_error result in dispatch a moment from now.
-            safe = bool(tool and tool.is_concurrency_safe)
+            safe = self._parallel_safe(tu)
             if safe and groups and groups[-1][0]:
                 groups[-1][1].append(tu)
             else:
                 groups.append((safe, [tu]))
         return groups
+
+    def _parallel_safe(self, tu: ToolUseRequest) -> bool:
+        """Whether this specific call may share a group.
+
+        Answering needs the validated arguments, so the schema is parsed here as
+        well as in dispatch. Fail closed at every step: an unknown tool, input
+        the schema rejects, or a flag check that raises all mean "run it alone".
+        Dispatch will produce the proper is_error a moment from now — this only
+        decides company, and it is never wrong to keep bad company out."""
+        tool = self.tools.get(tu.name)
+        if tool is None:
+            return False
+        try:
+            return bool(tool.is_concurrency_safe(tool.Args.model_validate(tu.input)))
+        except Exception:  # noqa: BLE001 — see docstring: unsafe is the safe answer
+            return False
 
     async def _dispatch(self, tu: ToolUseRequest) -> ToolResult:
         """One gauntlet run, bounded by the in-flight ceiling. The cap matters at

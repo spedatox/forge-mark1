@@ -72,6 +72,22 @@ class Decision:
 ALLOW = Decision("allow")
 
 
+def _flag(tool: Any, name: str, args: Any) -> bool:
+    """Ask a tool one of its per-input safety questions, failing closed.
+
+    Closed means different things for different questions, and the caller's
+    framing decides: `is_destructive` failing closed is True (gate it), while
+    `is_read_only` failing closed is False (treat it as a mutation). Both come
+    out of the same rule — assume the answer that restricts."""
+    check = getattr(tool, name, None)
+    if check is None:
+        return False
+    try:
+        return bool(check(args))
+    except Exception:  # noqa: BLE001 — an undecidable flag is a gated one
+        return name == "is_destructive"
+
+
 @dataclass
 class AllowList:
     """A tiny session allow-store so the operator's known-safe, repeated actions
@@ -97,13 +113,13 @@ class AllowList:
         return False
 
 
-def gate_reason(tool: Any, args_dict: dict[str, Any]) -> str | None:
+def gate_reason(tool: Any, args: Any, args_dict: dict[str, Any]) -> str | None:
     """Return a reason string if (tool, args) is an irreversible / high-blast-
-    radius operation the gate must stop; else None. Tool-agnostic: it inspects
-    the tool's own `is_destructive` flag and any `path` / `command` arguments, so
-    it needs no per-tool wiring."""
-    if getattr(tool, "is_destructive", False):
-        return "tool is marked destructive (irreversible operation)"
+    radius operation the gate must stop; else None. Tool-agnostic: it asks the
+    tool whether this call is destructive and inspects any `path` / `command`
+    arguments, so it needs no per-tool wiring."""
+    if _flag(tool, "is_destructive", args):
+        return "this call is destructive (irreversible operation)"
     path = args_dict.get("path")
     if isinstance(path, str):
         for rx in _SENSITIVE_RE:
@@ -131,12 +147,15 @@ class PermissionEngine:
                 return v
         return None
 
-    def resolve(self, tool: Any, args_dict: dict[str, Any], ctx: Any) -> Decision:
+    def resolve(self, tool: Any, args: Any, ctx: Any) -> Decision:
+        """Decide one call. `args` is the tool's validated argument model — the
+        per-input safety flags cannot be asked without it."""
+        args_dict = args.model_dump() if hasattr(args, "model_dump") else dict(args)
         key = self._action_key(args_dict)
 
         # (3) The safety gate is computed first because it is BYPASS-IMMUNE: an
         # allow-list hit or act mode can never override it.
-        gate = gate_reason(tool, args_dict)
+        gate = gate_reason(tool, args, args_dict)
 
         # (1) Session allow-list — but never for a gated operation.
         if gate is None and self.allowlist.allows(tool.name, key):
@@ -158,7 +177,7 @@ class PermissionEngine:
             )
 
         # (4) Mode.
-        if self.mode is Mode.PLAN and not getattr(tool, "is_read_only", False):
+        if self.mode is Mode.PLAN and not _flag(tool, "is_read_only", args):
             return Decision("deny", "plan mode is active: mutating tools are disabled for review.")
 
         if own is not None and own.behavior == "allow":

@@ -41,10 +41,8 @@ async def dispatch_tool(
     except ValidationError as e:
         return ToolResult(f"Invalid input for {name!r}: {e}", is_error=True)
 
-    args_dict = args.model_dump()
-
     # 3. Permit (deny/gate → is_error).
-    decision = ctx.permissions.resolve(tool, args_dict, ctx)
+    decision = ctx.permissions.resolve(tool, args, ctx)
     if not decision.allowed:
         return ToolResult(f"Permission denied for {name!r}: {decision.reason}", is_error=True)
 

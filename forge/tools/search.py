@@ -150,8 +150,8 @@ class Grep(Tool):
         "lines — content mode over a broad pattern is the expensive way to orient."
     )
     Args = GrepArgs
-    is_read_only = True
-    is_concurrency_safe = True
+    READ_ONLY = True
+    CONCURRENCY_SAFE = True
     max_result_chars = 40_000
 
     async def call(self, args: GrepArgs, ctx: ToolContext) -> ToolResult:
@@ -244,8 +244,8 @@ class Glob(Tool):
         "safe to run in parallel. Use grep instead when you care about file contents."
     )
     Args = GlobArgs
-    is_read_only = True
-    is_concurrency_safe = True
+    READ_ONLY = True
+    CONCURRENCY_SAFE = True
     max_result_chars = 20_000
 
     MAX_RESULTS = 200

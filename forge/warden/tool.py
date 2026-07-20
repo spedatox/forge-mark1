@@ -49,10 +49,48 @@ class Tool(abc.ABC):
     Args: type[BaseModel]            # the input schema
 
     # ── Harness-side, fail-closed defaults (§4) ──────────────────────────────
-    is_read_only: bool = False       # assume it writes
-    is_concurrency_safe: bool = False  # assume unsafe to parallelize
-    is_destructive: bool = False     # assume reversible; destructive tools opt in
-    max_result_chars: int = 20_000   # cap one result; oversize is truncated/spilled
+    # Declared as constants because most tools have one honest answer for every
+    # input. Read through the methods below, never directly: a tool whose answer
+    # depends on its arguments — a shell that is read-only for `ls` and not for
+    # `rm` — overrides the method, and every call site must reach that override.
+    READ_ONLY: bool = False          # assume it writes
+    CONCURRENCY_SAFE: bool = False   # assume unsafe to parallelize
+    DESTRUCTIVE: bool = False        # assume reversible; destructive tools opt in
+
+    max_result_chars: float = 20_000  # cap one result; oversize is truncated/spilled
+
+    def is_read_only(self, args: BaseModel) -> bool:
+        return self.READ_ONLY
+
+    def is_concurrency_safe(self, args: BaseModel) -> bool:
+        """Whether THIS call may run alongside others. Per-input, because the
+        answer usually is: two greps are safe together, two `pip install`s are
+        not, and a tool that must answer for its worst case serializes its best
+        one."""
+        return self.CONCURRENCY_SAFE
+
+    def is_destructive(self, args: BaseModel) -> bool:
+        return self.DESTRUCTIVE
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        """Reject a subclass that shadows a safety method with a plain value.
+
+        These were class attributes before they were methods, so `is_read_only =
+        True` still *looks* right. It silently replaces the method with a bool,
+        every call site's `flag(args)` raises, and each one fails closed — the
+        tool keeps working while quietly losing parallelism or gaining a gate.
+        Failing closed is what makes this invisible, so it has to be caught here
+        rather than discovered as a mysterious slowdown."""
+        super().__init_subclass__(**kwargs)
+        for name, constant in (("is_read_only", "READ_ONLY"),
+                               ("is_concurrency_safe", "CONCURRENCY_SAFE"),
+                               ("is_destructive", "DESTRUCTIVE")):
+            value = cls.__dict__.get(name)
+            if value is not None and not callable(value):
+                raise TypeError(
+                    f"{cls.__name__}.{name} is set to {value!r}, but it is a method. "
+                    f"Declare `{constant} = {value!r}` instead, or override "
+                    f"`{name}(self, args)` if the answer depends on the input.")
 
     @abc.abstractmethod
     async def call(self, args: BaseModel, ctx: ToolContext) -> ToolResult:

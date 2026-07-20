@@ -27,8 +27,8 @@ class Nudge(Tool):
     name = "nudge"
     description = "do nothing, successfully"
     Args = NudgeArgs
-    is_read_only = True
-    is_concurrency_safe = True
+    READ_ONLY = True
+    CONCURRENCY_SAFE = True
 
     async def call(self, args: NudgeArgs, ctx: ToolContext) -> ToolResult:
         return ToolResult("ok")

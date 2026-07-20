@@ -50,8 +50,8 @@ class ReadFile(Tool):
         "safe to run in parallel."
     )
     Args = ReadFileArgs
-    is_read_only = True
-    is_concurrency_safe = True
+    READ_ONLY = True
+    CONCURRENCY_SAFE = True
     # Exempt from the result budget: spilling a read produces a file whose only
     # use is to be read back, so the tool bounds itself instead — see the ceiling
     # enforced in `call`, and offset/limit for working through a large file.
@@ -137,8 +137,8 @@ class WriteFile(Tool):
         "(.git internals, credentials, shell config) is stopped by the safety gate."
     )
     Args = WriteFileArgs
-    is_read_only = False
-    is_concurrency_safe = False
+    READ_ONLY = False
+    CONCURRENCY_SAFE = False
 
     async def call(self, args: WriteFileArgs, ctx: ToolContext) -> ToolResult:
         await ctx.cell.write(args.path, args.content)
@@ -164,8 +164,8 @@ class EditFile(Tool):
         "mutating operation and runs one at a time."
     )
     Args = EditFileArgs
-    is_read_only = False
-    is_concurrency_safe = False
+    READ_ONLY = False
+    CONCURRENCY_SAFE = False
 
     async def call(self, args: EditFileArgs, ctx: ToolContext) -> ToolResult:
         try:

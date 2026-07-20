@@ -31,8 +31,8 @@ class Bulk(Tool):
     name = "bulk"
     description = "produce output of a requested size"
     Args = BulkArgs
-    is_read_only = True
-    is_concurrency_safe = True
+    READ_ONLY = True
+    CONCURRENCY_SAFE = True
     max_result_chars = 40_000
 
     async def call(self, args: BulkArgs, ctx: ToolContext) -> ToolResult:
