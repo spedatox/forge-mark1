@@ -8,8 +8,8 @@ container the Docker socket — handing host root to whatever the agent generate
 which is the exact thing the Cell exists to prevent.
 
 ```
-systemd: forge.service                      (host, root — needs the docker socket)
-  └─ python -m forge connect --agent optimus
+systemd: forge@<agent>.service              (host, root — needs the docker socket)
+  └─ python -m forge connect --agent <agent>
        └─ docker run --rm --network none --cap-drop ALL --user 1000  ← one per job
             └─ /workspace  ⇄  /opt/hisar/vault/Forge/workspaces/<agent>
 ```
@@ -136,6 +136,6 @@ There is no CI for this repo. After pushing:
 
 ```bash
 cd /opt/forge-mk1 && git fetch origin main && git reset --hard origin/main
-./.venv/bin/pip install -e .        # only when dependencies changed
+./.venv/bin/pip install -e ".[providers]"   # only when dependencies changed
 systemctl restart forge@optimus forge@centurion
 ```
