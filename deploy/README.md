@@ -22,9 +22,21 @@ systemd: forge.service                      (host, root — needs the docker soc
 git clone https://github.com/spedatox/forge-mark1.git /opt/forge-mk1
 cd /opt/forge-mk1
 python3 -m venv .venv
-./.venv/bin/pip install -e .
+./.venv/bin/pip install -e ".[providers]"
 docker pull python:3.12-slim          # the Cell image
 ```
+
+The `providers` extra is **not** optional in practice on this deployment. It
+pulls the OpenAI client, which every non-Anthropic provider shares (OpenAI,
+Gemini, z.ai, DeepSeek, Ollama). Install without it and a plain `pip install -e .`
+looks fine until a model pin resolves to one of them, then dies with
+`ModuleNotFoundError: No module named 'openai'` mid-job. Anthropic-only
+deployments can skip it; this one cannot, because Igor's model pins can route to
+any configured provider.
+
+Providers verified against Igor's env: Anthropic, OpenAI, z.ai. Gemini has no
+`GEMINI_API_KEY` anywhere on the box — add it to Igor's `.env` before pinning
+anything to Gemini.
 
 ## 2. Configure
 
