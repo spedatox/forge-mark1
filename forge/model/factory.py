@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Callable
 
 from forge.model.base import Model, TextDelta, ToolUseRequest
 from forge.model.providers import OpenAICompatModel, parse_model_ref
@@ -22,12 +22,49 @@ from forge.model.providers import OpenAICompatModel, parse_model_ref
 logger = logging.getLogger("forge.model")
 
 
+ModelBuilder = Callable[[str, Any, int], Model]
+
+# Seam 5. Providers registered here are tried before the OpenAI-compatible
+# fallback, so a plugin backend can claim a name without editing this file.
+_PROVIDERS: dict[str, ModelBuilder] = {}
+
+
+def register_provider(name: str, builder: ModelBuilder) -> None:
+    """Register a `provider:model` prefix.
+
+    Registration is idempotent by last-writer-wins, which is deliberate: a model
+    backend is chosen by the operator's profile, and an operator who registers a
+    replacement for a builtin name has said what they meant. This is the one
+    registry where shadowing is allowed — Seam 1 forbids it for tools, because
+    there the shadowed thing has authority the model relies on."""
+    _PROVIDERS[name] = builder
+
+
+def _build_anthropic(model: str, settings: Any, max_tokens: int) -> Model:
+    from forge.model.anthropic_model import AnthropicModel
+    return AnthropicModel(model_id=model, api_key=settings.anthropic_api_key,
+                          max_tokens=max_tokens)
+
+
+# The builtin table registers through the same call a plugin would, so the path
+# is exercised by every run rather than only by the first plugin to try it.
+register_provider("anthropic", _build_anthropic)
+
+
 def _build_single(ref: str, settings: Any, max_tokens: int) -> Model:
+    # The registry is consulted BEFORE parse_model_ref, which matches against a
+    # closed set of builtin prefixes and treats anything it does not recognize as
+    # a bare Anthropic model name. Parsing first would therefore route every
+    # newly registered provider to Anthropic — the registration surface would
+    # exist and be unreachable, which is worse than not having one.
+    prefix, sep, rest = ref.partition(":")
+    if sep and prefix in _PROVIDERS:
+        return _PROVIDERS[prefix](rest, settings, max_tokens)
+
     provider, model = parse_model_ref(ref)
-    if provider == "anthropic":
-        from forge.model.anthropic_model import AnthropicModel
-        return AnthropicModel(model_id=model, api_key=settings.anthropic_api_key,
-                              max_tokens=max_tokens)
+    builder = _PROVIDERS.get(provider)
+    if builder is not None:
+        return builder(model, settings, max_tokens)
     return OpenAICompatModel(provider, model, settings, max_tokens=max_tokens)
 
 

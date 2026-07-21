@@ -11,7 +11,7 @@ read-only, NOT destructive, and NOT auto-permitted unless it declares otherwise.
 from __future__ import annotations
 
 import abc
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel
@@ -40,6 +40,9 @@ class ToolContext:
     files: "FileStateCache"
     permissions: "PermissionEngine"
     network_allowed: bool
+    hooks: list = field(default_factory=list)
+    """Seam 3 extension points, consulted inside the dispatch gauntlet. Empty
+    unless something registered one at assembly."""
 
 
 class Tool(abc.ABC):

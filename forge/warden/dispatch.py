@@ -14,6 +14,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from forge.warden.hooks import run_post_tool, run_pre_tool
 from forge.warden.results import cap_result
 from forge.warden.tool import Tool, ToolContext, ToolResult
 
@@ -46,6 +47,22 @@ async def dispatch_tool(
     if not decision.allowed:
         return ToolResult(f"Permission denied for {name!r}: {decision.reason}", is_error=True)
 
+    # 3b. pre_tool hooks (Seam 3). Deliberately AFTER permission: a hook must not
+    #     be able to see, let alone approve, what the gate refused.
+    hooks = getattr(ctx, "hooks", None) or []
+    if hooks:
+        hooked_args, veto = await run_pre_tool(hooks, tool, args.model_dump(), ctx)
+        if veto is not None:
+            return ToolResult(f"A hook blocked {name!r}: {veto.reason}", is_error=True)
+        try:
+            args = tool.Args.model_validate(hooked_args)
+        except ValidationError as e:
+            # A hook rewrote the arguments into something the tool cannot accept.
+            # That is the hook's bug, not the model's, so say so plainly rather
+            # than handing the model a validation error it cannot act on.
+            return ToolResult(f"A hook produced invalid input for {name!r}: {e}",
+                              is_error=True)
+
     # 4. Execute. Any throw becomes an is_error result (fail loud to the model,
     #    never out of the loop).
     try:
@@ -53,6 +70,11 @@ async def dispatch_tool(
     except Exception as e:  # noqa: BLE001 — the loop's safety net
         logger.warning("tool_call_raised", extra={"tool": name, "error": repr(e)})
         return ToolResult(f"<tool_error>{type(e).__name__}: {e}</tool_error>", is_error=True)
+
+    # 4b. post_tool hooks (Seam 3), BEFORE capping — a redactor should act on
+    #     what was produced, not on a preview of it.
+    if hooks:
+        result = await run_post_tool(hooks, tool, args.model_dump(), result, ctx)
 
     # 5. Cap result size — spill oversize to disk (§4). The batch-wide budget is
     #    the engine's job, once every result in the turn is known.

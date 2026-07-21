@@ -13,15 +13,22 @@ from pathlib import Path
 from typing import Awaitable, Callable
 
 from forge.agents.config import AgentConfig
+from forge.agents.prompt import PromptFragment, compose_system_prompt
 from forge.agents.registry import AgentRegistry
 from forge.cell.base import CellPolicy
 from forge.cell.factory import build_cell
 from forge.config import ForgeSettings
+from forge.gate.events import EventFan
 from forge.gate.protocol import JobEvent, JobRequest
 from forge.graph.sidecar import GraphSidecar
 from forge.model.base import Model
-from forge.tools import ALL_TOOLS
 from forge.warden.engine import Warden
+from forge.warden.toolsource import (
+    BuiltinToolProvider,
+    ToolProvider,
+    close_providers,
+    fold_providers,
+)
 from forge.warden.filestate import FileStateCache
 from forge.warden.ledger import TokenLedger
 from forge.warden.permissions import AllowList, Mode, PermissionEngine
@@ -42,6 +49,10 @@ async def run_job(
     model: Model | None = None,
     signal: asyncio.Event | None = None,
     allowlist: AllowList | None = None,
+    tool_providers: list[ToolProvider] | None = None,
+    hooks: list | None = None,
+    fragments: list[PromptFragment] | None = None,
+    event_sinks: list | None = None,
 ) -> Terminal:
     """Run one job to a single Terminal, streaming JobEvents via `emit`.
 
@@ -50,8 +61,12 @@ async def run_job(
     cfg = registry.get(request.agent)
     signal = signal or asyncio.Event()
 
+    # Seam 4: the transport is one sink among several, and no sink can fail the
+    # job. Callers append journals, metrics, notifiers here.
+    fan = EventFan([*(event_sinks or []), emit])
+
     async def out(etype: str, data=None) -> None:
-        await emit(JobEvent(job_id=request.job_id, type=etype, data=data))
+        await fan(JobEvent(job_id=request.job_id, type=etype, data=data))
 
     await out("started", {"agent": cfg.agent_id, "job_id": request.job_id})
 
@@ -70,6 +85,7 @@ async def run_job(
 
     cell = None
     graph = None
+    providers: list[ToolProvider] = []
     try:
         cell = await build_cell(
             agent_id=cfg.agent_id,
@@ -95,7 +111,11 @@ async def run_job(
         # trigger with either too little room to finish or more than it needs.
         model = model or _build_model(model_ref, settings, settings.max_tokens)
 
-        tools = {name: ALL_TOOLS[name]() for name in cfg.tool_names}
+        # Seam 1: tools arrive by folding an ordered provider list. The builtin
+        # set comes through the same door as anything else would.
+        providers = list(tool_providers) if tool_providers else [BuiltinToolProvider()]
+        tools = await fold_providers(providers, cfg, request)
+
         ctx = ToolContext(
             agent_id=cfg.agent_id,
             cell=cell,
@@ -106,10 +126,18 @@ async def run_job(
                 allowlist=allowlist or AllowList(),
             ),
             network_allowed=allow_network,
+            hooks=list(hooks or []),          # Seam 3
         )
 
+        # Seam 7: the profile's identity is itself a fragment, so nothing has to
+        # be reshaped when a second contributor appears.
+        system_prompt = compose_system_prompt([
+            PromptFragment("profile", cfg.system_prompt),
+            *(fragments or []),
+        ])
+
         warden = Warden(
-            system_prompt=cfg.system_prompt,
+            system_prompt=system_prompt,
             tools=tools,
             model=model,
             ctx=ctx,
@@ -119,7 +147,9 @@ async def run_job(
                                max_output_tokens=settings.max_tokens),
             retry_attempts=settings.retry_attempts,
             retry_base_delay=settings.retry_base_delay_s,
-            emit=lambda ev: emit(JobEvent(job_id=request.job_id, type=ev["type"], data=ev.get("data"))),
+            refresh_tools=lambda: fold_providers(providers, cfg, request),
+            emit=lambda ev: fan(JobEvent(job_id=request.job_id, type=ev["type"],
+                                         data=ev.get("data"))),
         )
         terminal = await warden.run(request.task)
         return terminal
@@ -128,6 +158,7 @@ async def run_job(
         await out("error", f"{type(e).__name__}: {e}")
         return Terminal(reason=StopReason.ERROR, error=f"{type(e).__name__}: {e}")
     finally:
+        await close_providers(providers)
         if graph is not None:
             await graph.close()
         if cell is not None:

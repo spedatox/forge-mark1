@@ -98,6 +98,7 @@ class Warden:
         ledger: TokenLedger | None = None,
         retry_attempts: int = RETRY_ATTEMPTS,
         retry_base_delay: float = RETRY_BASE_DELAY_S,
+        refresh_tools: Callable[[], Awaitable[dict[str, Tool]]] | None = None,
     ) -> None:
         self.system_prompt = system_prompt
         self.tools = tools
@@ -111,6 +112,7 @@ class Warden:
         self.ledger = ledger or TokenLedger()
         self.retry_attempts = retry_attempts
         self.retry_base_delay = retry_base_delay
+        self.refresh_tools = refresh_tools
 
     async def run(self, task: str) -> Terminal:
         """Drive the loop for one job and return its single typed Terminal."""
@@ -131,6 +133,10 @@ class Warden:
             # ── Make room, before spending a turn discovering there is none. ──
             if state.ledger.should_compact():
                 await self._compact(state)
+
+            # ── Seam 1: a source that came up mid-job joins here. ────────────
+            if await self._refresh_tools():
+                tool_schemas = [t.schema() for t in self.tools.values()]
 
             # ── Act: stream one model turn, collecting text + tool-use blocks. ─
             turn = await self._stream_turn(state, tool_schemas)
@@ -202,6 +208,31 @@ class Warden:
                 return self._aborted(state)
 
             state.advance(ContinueReason.NEXT_TURN)
+
+    # ── Seam 1: the toolset can change between turns ─────────────────────────
+    async def _refresh_tools(self) -> bool:
+        """Re-ask the providers. True if the set of names changed.
+
+        Only the *names* are compared, and the toolset is left alone when they
+        match. Providers hand back fresh instances every call, so swapping on
+        every turn would rebuild the schema array and change the bytes sent to
+        the provider — busting the prompt cache on every iteration to achieve
+        nothing. The names are what the model can see and what a new source
+        actually adds."""
+        if self.refresh_tools is None:
+            return False
+        try:
+            latest = await self.refresh_tools()
+        except Exception as e:  # noqa: BLE001 — a source that failed to reload
+            logger.warning("tool_refresh_failed", extra={"error": repr(e)})
+            return False        # keep running with the toolset we have
+        if set(latest) == set(self.tools):
+            return False
+        added = sorted(set(latest) - set(self.tools))
+        removed = sorted(set(self.tools) - set(latest))
+        logger.info("toolset_changed", extra={"added": added, "removed": removed})
+        self.tools = latest
+        return True
 
     # ── Making room ──────────────────────────────────────────────────────────
     async def _compact(self, state: LoopState, forced: bool = False) -> bool:
