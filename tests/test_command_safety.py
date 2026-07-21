@@ -69,7 +69,8 @@ def test_the_gate_still_fires_on_a_command_that_reads_as_safe_otherwise():
     engine = PermissionEngine(mode=Mode.ACT)
     decision = engine.resolve(
         RunCommand(), RunCommandArgs(command="git push --force origin main"), None)
-    assert not decision.allowed and "safety gate" in decision.reason
+    assert not decision.allowed and decision.needs_ask
+    assert "safety gate" in decision.reason
 
 
 # ── The shadowing guard ──────────────────────────────────────────────────────

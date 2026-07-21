@@ -8,6 +8,7 @@ Oversized results are spilled to a file in the Cell workspace and replaced with 
 preview + path, so one fat result can't blow the context (§4)."""
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any
@@ -15,6 +16,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from forge.warden.hooks import run_post_tool, run_pre_tool
+from forge.warden.permissions import Decision
 from forge.warden.results import cap_result
 from forge.warden.tool import Tool, ToolContext, ToolResult
 
@@ -42,10 +44,18 @@ async def dispatch_tool(
     except ValidationError as e:
         return ToolResult(f"Invalid input for {name!r}: {e}", is_error=True)
 
-    # 3. Permit (deny/gate → is_error).
+    # 3. Permit (deny → is_error; ask → put it to the operator).
     decision = ctx.permissions.resolve(tool, args, ctx)
+    if decision.needs_ask:
+        decision = await _ask(tool, name, args, decision, ctx)
     if not decision.allowed:
         return ToolResult(f"Permission denied for {name!r}: {decision.reason}", is_error=True)
+    if decision.updated_args is not None:
+        try:
+            args = tool.Args.model_validate(decision.updated_args)
+        except ValidationError as e:
+            return ToolResult(f"The permission layer rewrote {name!r}'s input into "
+                              f"something invalid: {e}", is_error=True)
 
     # 3b. pre_tool hooks (Seam 3). Deliberately AFTER permission: a hook must not
     #     be able to see, let alone approve, what the gate refused.
@@ -79,6 +89,43 @@ async def dispatch_tool(
     # 5. Cap result size — spill oversize to disk (§4). The batch-wide budget is
     #    the engine's job, once every result in the turn is known.
     return await cap_result(tool, name, result, ctx)
+
+
+async def _ask(tool: Tool, name: str, args: Any, decision: "Decision",
+               ctx: ToolContext) -> "Decision":
+    """Put a gated action to the operator and turn the answer into a decision.
+
+    With no oracle attached the answer is no — identical to the behaviour before
+    any of this existed, which is what makes the ask safe to ship before
+    anything is listening for it."""
+    from forge.warden.permissions import Decision as _D
+
+    oracle = getattr(ctx, "oracle", None)
+    args_dict = args.model_dump() if hasattr(args, "model_dump") else dict(args)
+    action_key = ctx.permissions._action_key(args_dict) or name
+
+    if oracle is None:
+        return _D("deny", f"{decision.reason} No operator channel is attached, so it "
+                          f"cannot be approved while this job runs.", source="gate")
+
+    try:
+        answer = await oracle.ask(name, action_key, decision.reason)
+    except asyncio.CancelledError:
+        raise                      # an interrupt is not an answer
+    except Exception as e:  # noqa: BLE001 — an oracle that broke did not say yes
+        logger.warning("permission_ask_failed", extra={"tool": name, "error": repr(e)})
+        return _D("deny", f"{decision.reason} The approval channel failed.", source="gate")
+
+    if not answer.approved:
+        return _D("deny", f"The operator declined this: {answer.note or decision.reason}",
+                  source="gate")
+
+    if answer.remember:
+        # Records the EXACT action, never a pattern. A glob is a deliberate,
+        # hand-written act by an operator reading their own allow-list file; it
+        # is not something to infer from one click on one command.
+        ctx.permissions.allowlist.add(f"{name}:{action_key}")
+    return _D("allow", "approved by the operator", source="gate")
 
 
 def to_anthropic_tool_result(tool_use_id: str, result: ToolResult) -> dict[str, Any]:

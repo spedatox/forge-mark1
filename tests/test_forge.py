@@ -92,40 +92,43 @@ def test_bad_input_becomes_error_result():
 
 
 # ── §6 permission & safety gate ──────────────────────────────────────────────
-def test_safety_gate_blocks_protected_paths():
+def test_safety_gate_stops_protected_paths():
+    """The gate is a checkpoint now, not a wall — but it still never lets an
+    operation past without an explicit decision."""
     eng = PermissionEngine(mode=Mode.ACT)
-    from forge.tools.files import WriteFile
-    d = eng.resolve(WriteFile(), {"path": ".git/config", "content": "x"}, None)
-    assert not d.allowed and "safety gate" in d.reason
+    from forge.tools.files import WriteFile, WriteFileArgs
+    d = eng.resolve(WriteFile(), WriteFileArgs(path=".git/config", content="x"), None)
+    assert d.needs_ask and not d.allowed and "safety gate" in d.reason
 
 
 def test_safety_gate_blocks_destructive_command():
     eng = PermissionEngine(mode=Mode.ACT)
-    from forge.tools.shell import RunCommand
-    d = eng.resolve(RunCommand(), {"command": "rm -rf /"}, None)
-    assert not d.allowed
+    from forge.tools.shell import RunCommand, RunCommandArgs
+    d = eng.resolve(RunCommand(), RunCommandArgs(command="rm -rf /"), None)
+    assert not d.allowed and d.needs_ask
 
 
 def test_gate_is_bypass_immune_even_with_allowlist():
     """An allow-list hit can never override the gate (§6)."""
     al = AllowList({"run_command"})  # operator allow-listed the whole tool
     eng = PermissionEngine(mode=Mode.ACT, allowlist=al)
-    from forge.tools.shell import RunCommand
-    d = eng.resolve(RunCommand(), {"command": "git push --force origin main"}, None)
-    assert not d.allowed
+    from forge.tools.shell import RunCommand, RunCommandArgs
+    d = eng.resolve(RunCommand(), RunCommandArgs(command="git push --force origin main"), None)
+    assert not d.allowed, "a blanket grant is not a decision about THIS action"
 
 
 def test_plan_mode_denies_mutations_allows_reads():
     eng = PermissionEngine(mode=Mode.PLAN)
     from forge.tools.files import WriteFile, ReadFile
-    assert not eng.resolve(WriteFile(), {"path": "a.txt", "content": "x"}, None).allowed
-    assert eng.resolve(ReadFile(), {"path": "a.txt"}, None).allowed
+    from forge.tools.files import ReadFileArgs, WriteFileArgs
+    assert not eng.resolve(WriteFile(), WriteFileArgs(path="a.txt", content="x"), None).allowed
+    assert eng.resolve(ReadFile(), ReadFileArgs(path="a.txt"), None).allowed
 
 
 def test_allowlist_lets_normal_command_through():
     eng = PermissionEngine(mode=Mode.ACT, allowlist=AllowList({"run_command:pytest*"}))
-    from forge.tools.shell import RunCommand
-    assert eng.resolve(RunCommand(), {"command": "pytest -q"}, None).allowed
+    from forge.tools.shell import RunCommand, RunCommandArgs
+    assert eng.resolve(RunCommand(), RunCommandArgs(command="pytest -q"), None).allowed
 
 
 # ── read-before-write freshness (study §3) ───────────────────────────────────

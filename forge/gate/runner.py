@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from pathlib import Path
-from typing import Awaitable, Callable
+from typing import Any, Awaitable, Callable
 
 from forge.agents.config import AgentConfig
 from forge.agents.prompt import PromptFragment, compose_system_prompt
@@ -49,6 +49,7 @@ async def run_job(
     model: Model | None = None,
     signal: asyncio.Event | None = None,
     allowlist: AllowList | None = None,
+    oracle: Any | None = None,
     tool_providers: list[ToolProvider] | None = None,
     hooks: list | None = None,
     fragments: list[PromptFragment] | None = None,
@@ -126,6 +127,7 @@ async def run_job(
                 allowlist=allowlist or AllowList(),
             ),
             network_allowed=allow_network,
+            oracle=oracle,                    # Seam 2
             hooks=list(hooks or []),          # Seam 3
         )
 

@@ -28,6 +28,8 @@ from forge.config import ForgeSettings
 from forge.gate.protocol import (JobEvent, job_event_to_chat_event,
                                  job_from_chat_request, job_from_task_dispatch)
 from forge.extensions import load_extensions
+from forge.warden.oracle import Answer, ChannelOracle
+from forge.warden.permissions import AllowList
 from forge.gate.runner import run_job
 from forge.warden.state import StopReason
 
@@ -50,6 +52,13 @@ class ForgePeer:
         # point, never via import side effects). Loaded here rather than per job
         # so an MCP server is started once and shared, not respawned per task.
         self.extensions = load_extensions()
+        # The operator's standing approvals, shared across every job this peer
+        # runs. Loaded once: "don't ask me again" that expired with the job
+        # would not mean what anyone reads it as.
+        self.allowlist = AllowList.load(settings.allowlist_path)
+        # One oracle for the peer — the socket is the channel, so parked asks
+        # from any job resolve through the same frame handler.
+        self._oracle = ChannelOracle(self._send, timeout_s=settings.ask_timeout_s)
         self._ws: Any = None
         self._send_lock = asyncio.Lock()
         self._chats: dict[str, asyncio.Event] = {}     # chat_id/task_id → abort signal
@@ -119,6 +128,10 @@ class ForgePeer:
                     await asyncio.gather(hb, recv, stop, return_exceptions=True)
             finally:
                 self._ws = None
+                # Losing the socket is not a reason to hang, and it is certainly
+                # not a reason to proceed: every question still waiting for an
+                # answer resolves to denied.
+                self._oracle.abandon_all("the operator channel closed")
                 for ev in self._chats.values():
                     ev.set()
 
@@ -170,6 +183,15 @@ class ForgePeer:
             ev = self._chats.get(str(frame.get("chat_id", "")))
             if ev is not None:
                 ev.set()
+        elif ftype == "permission_response":
+            # Additive frame (law 3). An answer to a question that already timed
+            # out is dropped, not an error — a slow operator is not a bug.
+            ask_id = str(frame.get("ask_id", ""))
+            answer = Answer(approved=bool(frame.get("approved")),
+                            remember=bool(frame.get("remember")),
+                            note=str(frame.get("note", "")))
+            if not self._oracle.resolve(ask_id, answer):
+                logger.info("permission_response_unmatched", extra={"ask_id": ask_id})
         elif ftype == "shutdown":
             logger.info("peer_shutdown_requested")
             self._shutdown = True
@@ -195,7 +217,8 @@ class ForgePeer:
                                  emit=sink, signal=signal,
                                  tool_providers=self.extensions.tool_providers(),
                                  fragments=self.extensions.fragments,
-                                 hooks=self.extensions.hooks)
+                                 hooks=self.extensions.hooks,
+                                 oracle=self._oracle, allowlist=self.allowlist)
             status = "ok" if term.reason is StopReason.COMPLETED else "error"
             result = term.final_text or (term.error or "(no output)")
             await self._send({
@@ -227,7 +250,8 @@ class ForgePeer:
                                  emit=emit, signal=signal,
                                  tool_providers=self.extensions.tool_providers(),
                                  fragments=self.extensions.fragments,
-                                 hooks=self.extensions.hooks)
+                                 hooks=self.extensions.hooks,
+                                 oracle=self._oracle, allowlist=self.allowlist)
             if not terminal_seen:
                 # Ensure Mark VI always gets a terminal frame (abort path, etc.).
                 final_type = "done" if term.reason is StopReason.COMPLETED else "error"

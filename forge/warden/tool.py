@@ -40,6 +40,9 @@ class ToolContext:
     files: "FileStateCache"
     permissions: "PermissionEngine"
     network_allowed: bool
+    oracle: "Any | None" = None
+    """Seam 2: who answers a gated action. None means nobody is reachable, which
+    resolves to deny — the failure direction is fixed."""
     hooks: list = field(default_factory=list)
     """Seam 3 extension points, consulted inside the dispatch gauntlet. Empty
     unless something registered one at assembly."""

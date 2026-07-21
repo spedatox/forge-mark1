@@ -72,6 +72,11 @@ class ForgeSettings:
     retry_attempts: int = 4
     retry_base_delay_s: float = 2.0
 
+    # Trust. An unanswered ask denies, so the timeout is how long a gated
+    # operation waits for a human before the job carries on without it.
+    ask_timeout_s: float = 120.0
+    allowlist_path: Path = field(default_factory=lambda: Path("./.forge/allowlist.json"))
+
     @classmethod
     def from_env(cls) -> "ForgeSettings":
         return cls(
@@ -92,4 +97,6 @@ class ForgeSettings:
             max_tokens=_int("FORGE_MAX_TOKENS", 16_384),
             retry_attempts=_int("FORGE_RETRY_ATTEMPTS", 4, allow_zero=True),
             retry_base_delay_s=_float("FORGE_RETRY_BASE_DELAY_S", 2.0),
+            ask_timeout_s=_float("FORGE_ASK_TIMEOUT_S", 120.0),
+            allowlist_path=Path(_env("FORGE_ALLOWLIST_PATH", "./.forge/allowlist.json")),
         )
