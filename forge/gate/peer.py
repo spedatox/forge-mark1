@@ -27,6 +27,7 @@ from forge.agents.config import AgentConfig
 from forge.config import ForgeSettings
 from forge.gate.protocol import (JobEvent, job_event_to_chat_event,
                                  job_from_chat_request, job_from_task_dispatch)
+from forge.extensions import load_extensions
 from forge.gate.runner import run_job
 from forge.warden.state import StopReason
 
@@ -45,6 +46,10 @@ class ForgePeer:
         self.cfg = cfg
         self.settings = settings
         self.registry = registry
+        # Process-wide extension layer (law 2: assembled once, at the entry
+        # point, never via import side effects). Loaded here rather than per job
+        # so an MCP server is started once and shared, not respawned per task.
+        self.extensions = load_extensions()
         self._ws: Any = None
         self._send_lock = asyncio.Lock()
         self._chats: dict[str, asyncio.Event] = {}     # chat_id/task_id → abort signal
@@ -187,7 +192,10 @@ class ForgePeer:
 
         try:
             term = await run_job(request, settings=self.settings, registry=self.registry,
-                                 emit=sink, signal=signal)
+                                 emit=sink, signal=signal,
+                                 tool_providers=self.extensions.tool_providers(),
+                                 fragments=self.extensions.fragments,
+                                 hooks=self.extensions.hooks)
             status = "ok" if term.reason is StopReason.COMPLETED else "error"
             result = term.final_text or (term.error or "(no output)")
             await self._send({
@@ -216,7 +224,10 @@ class ForgePeer:
 
         try:
             term = await run_job(request, settings=self.settings, registry=self.registry,
-                                 emit=emit, signal=signal)
+                                 emit=emit, signal=signal,
+                                 tool_providers=self.extensions.tool_providers(),
+                                 fragments=self.extensions.fragments,
+                                 hooks=self.extensions.hooks)
             if not terminal_seen:
                 # Ensure Mark VI always gets a terminal frame (abort path, etc.).
                 final_type = "done" if term.reason is StopReason.COMPLETED else "error"
