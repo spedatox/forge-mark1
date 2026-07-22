@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import abc
 from dataclasses import dataclass
+from pathlib import Path
 
 
 @dataclass(frozen=True)
@@ -37,6 +38,19 @@ class Cell(abc.ABC):
     exceptions, mirroring the errors-as-results discipline of the loop)."""
 
     policy: CellPolicy
+
+    @property
+    def host_path(self) -> "Path | None":
+        """The workspace as the harness can see it, or None when it cannot.
+
+        Search and navigation run Warden-side over this path — the same
+        separation the Graphify sidecar already uses, and for the same reason:
+        the Cell's isolation posture governs *generated code*, not the harness's
+        own instruments. A backend with no host-visible workspace (an ephemeral
+        container, a remote VM) returns None, and those tools report themselves
+        unavailable rather than guessing. Concrete, not abstract: None is a
+        correct answer, so a new backend is not required to have one."""
+        return None
 
     @abc.abstractmethod
     async def start(self) -> None:

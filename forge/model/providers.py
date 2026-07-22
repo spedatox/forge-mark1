@@ -24,7 +24,32 @@ import logging
 import uuid
 from typing import Any, AsyncIterator
 
-from forge.model.base import TextDelta, ToolUseRequest
+from forge.model.base import ModelEvent, TextDelta, ToolUseRequest, UsageReport
+
+
+def _usage_report(usage: Any) -> UsageReport | None:
+    """Normalize a provider's usage object, whatever it calls its fields.
+
+    Yielding nothing is a legitimate outcome: usage is optional by contract and
+    the ledger estimates when a provider stays silent. Most OpenAI-compatible
+    endpoints only send usage when asked via `stream_options`, which is not
+    universally supported across the providers this adapter serves — so this
+    reads what arrives rather than demanding it."""
+    if usage is None:
+        return None
+    prompt = getattr(usage, "prompt_tokens", None)
+    if prompt is None:
+        prompt = getattr(usage, "input_tokens", 0) or 0
+    completion = getattr(usage, "completion_tokens", None)
+    if completion is None:
+        completion = getattr(usage, "output_tokens", 0) or 0
+    details = getattr(usage, "prompt_tokens_details", None)
+    cached = getattr(details, "cached_tokens", 0) or 0 if details else 0
+    # Providers report prompt_tokens INCLUSIVE of cached tokens, the opposite of
+    # Anthropic. Split them so the ledger's arithmetic means the same thing on
+    # both sides.
+    return UsageReport(input_tokens=max(0, prompt - cached),
+                       output_tokens=completion, cache_read=cached)
 
 logger = logging.getLogger("forge.model")
 
@@ -132,10 +157,12 @@ class OpenAICompatModel:
                                    tools, self.max_tokens)
         raw = await self._client.chat.completions.create(**params, stream=True)
         acc: dict[int, dict[str, str]] = {}
+        usage: Any = None
         try:
             async for chunk in raw:
                 if signal.is_set():
                     break
+                usage = getattr(chunk, "usage", None) or usage
                 if not chunk.choices:
                     continue
                 delta = chunk.choices[0].delta
@@ -161,10 +188,13 @@ class OpenAICompatModel:
             yield ToolUseRequest(id=slot["id"] or _gen_tool_id(),
                                  name=slot["name"],
                                  input=_parse_tool_args(slot["arguments"], slot["name"]))
+        report = _usage_report(usage)
+        if report is not None:
+            yield report
 
     async def _stream_responses(self, system: str, messages: list[dict[str, Any]],
                                 tools: list[dict[str, Any]], signal: asyncio.Event
-                                ) -> AsyncIterator[TextDelta | ToolUseRequest]:
+                                ) -> AsyncIterator[ModelEvent]:
         """The /v1/responses path, yielding exactly what the caller above does.
 
         The event shape is different from chat-completions: text arrives as
@@ -176,11 +206,14 @@ class OpenAICompatModel:
         raw = await self._client.responses.create(**params, stream=True)
         # output_index → accumulating call.
         calls: dict[int, dict[str, str]] = {}
+        usage: Any = None
         try:
             async for event in raw:
                 if signal.is_set():
                     break
                 etype = getattr(event, "type", "")
+                if etype == "response.completed":
+                    usage = getattr(getattr(event, "response", None), "usage", None) or usage
                 if etype == "response.output_text.delta":
                     delta = getattr(event, "delta", "") or ""
                     if delta:
@@ -209,6 +242,9 @@ class OpenAICompatModel:
             yield ToolUseRequest(id=slot["id"] or _gen_tool_id(),
                                  name=slot["name"],
                                  input=_parse_tool_args(slot["arguments"], slot["name"]))
+        report = _usage_report(usage)
+        if report is not None:
+            yield report
 
 
 # ── Anthropic content-block → chat-completions translation ───────────────────

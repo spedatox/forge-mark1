@@ -38,8 +38,8 @@ class GraphQuery(Tool):
         "— follow up with read_file on the specific files it points you to."
     )
     Args = GraphQueryArgs
-    is_read_only = True
-    is_concurrency_safe = True
+    READ_ONLY = True
+    CONCURRENCY_SAFE = True
 
     async def call(self, args: GraphQueryArgs, ctx: ToolContext) -> ToolResult:
         if (na := _no_graph(ctx)):
@@ -67,8 +67,8 @@ class GraphPath(Tool):
         "that no path exists."
     )
     Args = GraphPathArgs
-    is_read_only = True
-    is_concurrency_safe = True
+    READ_ONLY = True
+    CONCURRENCY_SAFE = True
 
     async def call(self, args: GraphPathArgs, ctx: ToolContext) -> ToolResult:
         if (na := _no_graph(ctx)):
@@ -95,8 +95,8 @@ class GraphOverview(Tool):
         "ranked list of central entities."
     )
     Args = GraphOverviewArgs
-    is_read_only = True
-    is_concurrency_safe = True
+    READ_ONLY = True
+    CONCURRENCY_SAFE = True
 
     async def call(self, args: GraphOverviewArgs, ctx: ToolContext) -> ToolResult:
         if (na := _no_graph(ctx)):

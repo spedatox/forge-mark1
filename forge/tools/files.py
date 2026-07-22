@@ -10,6 +10,7 @@ import hashlib
 
 from pydantic import BaseModel, Field
 
+from forge.warden.results import EXEMPT
 from forge.warden.tool import Tool, ToolContext, ToolResult
 
 
@@ -18,30 +19,106 @@ def _hash(content: str) -> str:
 
 
 # ── read_file ────────────────────────────────────────────────────────────────
+DEFAULT_LINE_LIMIT = 2000
+MAX_READ_CHARS = 100_000       # roughly 25k tokens: one read's share of a window
+
+FILE_UNCHANGED_STUB = (
+    "File unchanged since your last read. The contents from that earlier read are "
+    "still current — refer to them rather than re-reading."
+)
+
+
 class ReadFileArgs(BaseModel):
     path: str = Field(description="Workspace-relative path of the file to read.")
+    offset: int | None = Field(
+        default=None, ge=1,
+        description="1-based line to start from. Omit to start at the beginning.")
+    limit: int | None = Field(
+        default=None, ge=1,
+        description=f"How many lines to read. Defaults to {DEFAULT_LINE_LIMIT}.")
 
 
 class ReadFile(Tool):
     name = "read_file"
     description = (
-        "Read a UTF-8 text file from your sandbox workspace and return its contents. "
-        "Use this before editing a file — edits are rejected until you have read the "
-        "current version (read-before-write). This tool is read-only and safe to run "
-        "in parallel with other reads. It returns the full file text."
+        "Read a UTF-8 text file from your sandbox workspace. Use this before editing a "
+        "file — edits are rejected until you have read the current version "
+        "(read-before-write). Output is line-numbered, which is what makes edit_file's "
+        f"exact-match anchoring reliable and composes with grep's path:line output. Reads "
+        f"up to {DEFAULT_LINE_LIMIT} lines by default; pass offset and limit to read a "
+        "window of a larger file, so no file is ever too big to work with. Read-only and "
+        "safe to run in parallel."
     )
     Args = ReadFileArgs
-    is_read_only = True
-    is_concurrency_safe = True
-    max_result_chars = 200_000     # a file is context the model asked for; spill only if huge
+    READ_ONLY = True
+    CONCURRENCY_SAFE = True
+    # Exempt from the result budget: spilling a read produces a file whose only
+    # use is to be read back, so the tool bounds itself instead — see the ceiling
+    # enforced in `call`, and offset/limit for working through a large file.
+    max_result_chars = EXEMPT
 
     async def call(self, args: ReadFileArgs, ctx: ToolContext) -> ToolResult:
         try:
             content = await ctx.cell.read(args.path)
         except FileNotFoundError as e:
             return ToolResult(f"File not found: {args.path} ({e})", is_error=True)
-        ctx.files.record(args.path, content, _hash(content))
-        return ToolResult(content)
+
+        digest = _hash(content)
+        windowed = args.offset is not None or args.limit is not None
+
+        # A whole-file re-read of something unchanged is the single most common
+        # duplicate in a long transcript. The model already has this text; hand
+        # back a pointer instead of a second copy. Only valid when the earlier
+        # read showed everything — after a windowed read the model does not.
+        prior = ctx.files.get(args.path)
+        if not windowed and prior is not None and prior.mtime == digest and prior.shown_fully:
+            return ToolResult(FILE_UNCHANGED_STUB)
+
+        # Freshness always records the hash of the WHOLE file, even for a window:
+        # edit-grounding must cover the parts that were not shown, or an edit to
+        # an unseen region would sail through on a partial read.
+        ctx.files.record(args.path, content, digest, shown_fully=not windowed)
+
+        lines = content.splitlines()
+        if not lines:
+            return ToolResult(f"[{args.path} is empty]")
+
+        start = args.offset or 1
+        if start > len(lines):
+            return ToolResult(
+                f"offset {start} is past the end of {args.path} ({len(lines)} lines).",
+                is_error=True)
+        count = args.limit if args.limit is not None else DEFAULT_LINE_LIMIT
+        window = lines[start - 1:start - 1 + count]
+        end = start + len(window) - 1
+
+        width = len(str(end))
+        body = "\n".join(f"{n:>{width}}→ {text}"
+                         for n, text in enumerate(window, start=start))
+
+        # Self-bounding. Refusing beats truncating here: a refusal costs ~100
+        # chars and the model retries with a narrower window, while a silent
+        # truncation costs the full ceiling in tokens AND hides that there was
+        # more. The exception is a single monstrous line — no smaller `limit`
+        # can help, so that one gets cut with the cut declared.
+        if len(body) > MAX_READ_CHARS:
+            if len(window) == 1:
+                return ToolResult(
+                    body[:MAX_READ_CHARS]
+                    + f"\n…[line {start} is {len(window[0])} chars; cut at "
+                      f"{MAX_READ_CHARS}]")
+            suggested = max(1, len(window) * MAX_READ_CHARS // len(body))
+            return ToolResult(
+                f"Lines {start}-{end} of {args.path} are {len(body)} chars, over the "
+                f"{MAX_READ_CHARS}-char ceiling for one read. Retry with a smaller "
+                f"window — about limit={suggested} — or grep for what you need.",
+                is_error=True)
+
+        remaining = len(lines) - end
+        if remaining > 0:
+            body += (f"\n\n…[{remaining} more line{'' if remaining == 1 else 's'}; "
+                     f"read from offset {end + 1} to continue]")
+        return ToolResult(body)
 
 
 # ── write_file ───────────────────────────────────────────────────────────────
@@ -60,8 +137,8 @@ class WriteFile(Tool):
         "(.git internals, credentials, shell config) is stopped by the safety gate."
     )
     Args = WriteFileArgs
-    is_read_only = False
-    is_concurrency_safe = False
+    READ_ONLY = False
+    CONCURRENCY_SAFE = False
 
     async def call(self, args: WriteFileArgs, ctx: ToolContext) -> ToolResult:
         await ctx.cell.write(args.path, args.content)
@@ -82,12 +159,13 @@ class EditFile(Tool):
         "Make a targeted edit to a file by replacing an exact substring. You must have "
         "read the file first and it must not have changed since (read-before-write "
         "grounding), or the edit is rejected with an explanation. The old_string must "
-        "match exactly once so the edit is unambiguous. It is a mutating operation and "
-        "runs one at a time."
+        "match exactly once so the edit is unambiguous, and it must match the file's raw "
+        "text — strip the line-number prefix that read_file adds for display. It is a "
+        "mutating operation and runs one at a time."
     )
     Args = EditFileArgs
-    is_read_only = False
-    is_concurrency_safe = False
+    READ_ONLY = False
+    CONCURRENCY_SAFE = False
 
     async def call(self, args: EditFileArgs, ctx: ToolContext) -> ToolResult:
         try:

@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any, AsyncIterator
 
-from forge.model.base import TextDelta, ToolUseRequest
+from forge.model.base import ModelEvent, TextDelta, ToolUseRequest, UsageReport
 
 
 class AnthropicModel:
@@ -27,7 +27,7 @@ class AnthropicModel:
 
     async def stream(self, *, system: str, messages: list[dict[str, Any]],
                      tools: list[dict[str, Any]], signal: asyncio.Event
-                     ) -> AsyncIterator[TextDelta | ToolUseRequest]:
+                     ) -> AsyncIterator[ModelEvent]:
         async with self._client.messages.stream(
             model=self.model_id,
             max_tokens=self.max_tokens,
@@ -46,3 +46,11 @@ class AnthropicModel:
             for block in final.content:
                 if getattr(block, "type", "") == "tool_use":
                     yield ToolUseRequest(id=block.id, name=block.name, input=dict(block.input))
+            usage = getattr(final, "usage", None)
+            if usage is not None:
+                yield UsageReport(
+                    input_tokens=getattr(usage, "input_tokens", 0) or 0,
+                    output_tokens=getattr(usage, "output_tokens", 0) or 0,
+                    cache_read=getattr(usage, "cache_read_input_tokens", 0) or 0,
+                    cache_write=getattr(usage, "cache_creation_input_tokens", 0) or 0,
+                )

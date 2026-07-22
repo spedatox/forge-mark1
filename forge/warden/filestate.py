@@ -16,6 +16,11 @@ from dataclasses import dataclass
 class FileState:
     content: str
     mtime: str          # opaque freshness token from the Cell (stat mtime, as text)
+    shown_fully: bool = False
+    """Whether the model was shown this file's entire text, as opposed to a
+    window of it. Freshness only cares that the file was read; the
+    unchanged-re-read shortcut additionally needs to know the model still *has*
+    the content, which is false after a ranged read."""
 
 
 class FileStateCache:
@@ -27,12 +32,18 @@ class FileStateCache:
     def _norm(path: str) -> str:
         return path.replace("\\", "/").rstrip("/")
 
-    def record(self, path: str, content: str, mtime: str) -> None:
+    def record(self, path: str, content: str, mtime: str, shown_fully: bool = True) -> None:
         key = self._norm(path)
-        self._cache[key] = FileState(content, mtime)
+        self._cache[key] = FileState(content, mtime, shown_fully)
         self._cache.move_to_end(key)
         while len(self._cache) > self._max:
             self._cache.popitem(last=False)
+
+    def clear(self) -> None:
+        """Forget every file. Called after compaction: the model's memory of file
+        contents is now a summary's, not a transcript's, so read-before-write
+        must make it look again rather than trust a read it can no longer see."""
+        self._cache.clear()
 
     def get(self, path: str) -> FileState | None:
         key = self._norm(path)
