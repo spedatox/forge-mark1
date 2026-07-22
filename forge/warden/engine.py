@@ -116,7 +116,16 @@ class Warden:
 
     async def run(self, task: str) -> Terminal:
         """Drive the loop for one job and return its single typed Terminal."""
-        state = LoopState(messages=[{"role": "user", "content": task}], ledger=self.ledger)
+        return await self.run_messages([{"role": "user", "content": task}])
+
+    async def run_messages(self, messages: list[dict[str, Any]]) -> Terminal:
+        """Same loop, seeded with an existing transcript.
+
+        A dispatched job starts from one task; a conversation continues from
+        everything already said. Both are the same loop over the same state —
+        only where `state.messages` begins differs, which is why this is the
+        real entry point and `run` is the one-message case of it."""
+        state = LoopState(messages=list(messages), ledger=self.ledger)
         tool_schemas = [t.schema() for t in self.tools.values()]
 
         while True:
