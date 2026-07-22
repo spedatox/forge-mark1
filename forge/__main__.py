@@ -43,6 +43,10 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("agents", help="list configured agents")
 
     args = parser.parse_args(argv)
+    # Local convenience: a .env beside the repo is how an operator keeps keys
+    # out of their shell profile. Real environment variables still win.
+    from forge.config import load_dotenv
+    load_dotenv()
     logging.basicConfig(level=os.environ.get("FORGE_LOG_LEVEL", "INFO"),
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
@@ -50,8 +54,16 @@ def main(argv: list[str] | None = None) -> int:
         # The REPL owns the terminal, so anything logged to stderr lands in the
         # middle of the conversation. Quiet by default; FORGE_LOG_LEVEL still
         # wins for anyone debugging the harness itself.
+        # The REPL owns the terminal. A logged traceback lands in the middle of
+        # the conversation and buries the readable error the renderer already
+        # showed, so the harness's own loggers are silenced here — the operator
+        # gets one clear line, and FORGE_LOG_LEVEL brings the detail back for
+        # anyone debugging the harness itself.
         if "FORGE_LOG_LEVEL" not in os.environ:
             logging.getLogger().setLevel(logging.WARNING)
+            for noisy in ("forge.warden", "forge.gate", "forge.cell",
+                          "forge.model", "forge.mcp", "forge.extensions"):
+                logging.getLogger(noisy).setLevel(logging.CRITICAL)
         from pathlib import Path
 
         from forge.tui import run_repl

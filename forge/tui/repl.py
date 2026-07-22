@@ -30,7 +30,7 @@ from forge.extensions import load_extensions
 from forge.gate.protocol import JobRequest
 from forge.tui import ansi
 from forge.tui.commands import resolve as resolve_command
-from forge.tui.render import StreamRenderer, banner
+from forge.tui.render import StreamRenderer, banner, humanize_error
 from forge.tui.session import Session
 from forge.warden.compaction import (
     elide_old_tool_results,
@@ -209,7 +209,7 @@ async def _run_turn(prompt: str, session: Session, settings: ForgeSettings,
 
     session.messages = list(terminal.messages)
     session.turns += 1
-    _report(terminal, session, verbose)
+    _report(terminal, session, verbose, already_shown=renderer.saw_error)
 
 
 async def _drive(warden: Warden, session: Session, prompt: str):
@@ -228,14 +228,16 @@ def _system_prompt(session: Session, extensions) -> str:
     ])
 
 
-def _report(terminal, session: Session, verbose: bool) -> None:
+def _report(terminal, session: Session, verbose: bool, already_shown: bool = False) -> None:
     if terminal.reason is StopReason.ABORTED:
         ansi.write(ansi.paint("  ⏹ stopped", "yellow"))
     elif terminal.reason is StopReason.MAX_ITERATIONS:
         ansi.write(ansi.paint(f"  ⏹ hit the {session.cfg.max_iterations}-iteration ceiling",
                               "yellow"))
-    elif terminal.reason is StopReason.ERROR:
-        ansi.write(ansi.paint(f"  ✗ {terminal.error}", "red"))
+    elif terminal.reason is StopReason.ERROR and not already_shown:
+        # The renderer usually showed this already, via the error event. Saying
+        # it twice makes one failure look like two.
+        ansi.write(ansi.paint(f"  ✗ {humanize_error(terminal.error or '')}", "red"))
 
     if verbose or terminal.reason is not StopReason.COMPLETED:
         usage = terminal.usage or {}

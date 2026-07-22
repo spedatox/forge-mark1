@@ -302,3 +302,44 @@ def test_clearing_frees_context_without_un_spending_money():
     assert session.messages == []
     assert session.ledger.prompt_tokens == 0
     assert session.ledger.input_tokens == 5_000 and session.ledger.turns == 3
+
+
+# ── Error presentation (found by the first live run) ────────────────────────
+def test_a_billing_error_says_what_to_do_about_it():
+    """A provider error arrives as a JSON blob inside an SDK exception name.
+    That is the right thing to log and the wrong thing to show someone who just
+    wants to know why their session stopped."""
+    from forge.tui.render import humanize_error
+
+    raw = ("Error code: 400 - {'type': 'error', 'error': {'type': "
+           "'invalid_request_error', 'message': 'Your credit balance is too low "
+           "to access the Anthropic API.'}}")
+    out = humanize_error(raw)
+    assert "out of credit" in out
+    assert "Plans & Billing" in out
+    assert "400" in out, "the raw error is kept — the friendly line is a guess"
+
+
+@pytest.mark.parametrize("raw,expect", [
+    ("authentication_error: invalid x-api-key", "rejected"),
+    ("rate_limit_error", "Rate limited"),
+    ("overloaded_error", "overloaded"),
+    ("prompt is too long: 210000 tokens", "/clear"),
+])
+def test_known_provider_errors_are_translated(raw, expect):
+    from forge.tui.render import humanize_error
+    assert expect in humanize_error(raw)
+
+
+def test_an_unrecognized_error_is_passed_through_bounded():
+    from forge.tui.render import humanize_error
+    assert humanize_error("something new") == "something new"
+    assert len(humanize_error("x" * 900)) < 400
+
+
+def test_the_turn_summary_does_not_repeat_an_error_the_stream_showed():
+    """One failure must not look like two."""
+    r = StreamRenderer()
+    assert r.saw_error is False
+    asyncio.run(r({"type": "error", "data": "boom"}))
+    assert r.saw_error is True

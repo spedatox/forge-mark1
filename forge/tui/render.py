@@ -26,6 +26,7 @@ class StreamRenderer:
         self.verbose = verbose
         self._wrote_text = False        # has model prose landed this turn?
         self._tool_names: dict[str, str] = {}
+        self.saw_error = False          # so the turn summary does not repeat it
 
     async def __call__(self, event: Any) -> None:
         kind = getattr(event, "type", None) or event.get("type")
@@ -94,7 +95,8 @@ class StreamRenderer:
 
     def _on_error(self, data: Any) -> None:
         ansi.write()
-        ansi.write(ansi.paint(f"  ✗ {data}", "red"))
+        ansi.write(ansi.paint(f"  ✗ {humanize_error(str(data))}", "red"))
+        self.saw_error = True
 
     def _on_usage(self, data: Any) -> None:
         if self.verbose and isinstance(data, dict):
@@ -119,6 +121,47 @@ def _summarize_args(args: dict[str, Any]) -> str:
         return ansi.truncate(json.dumps(args, default=str), 60)
     except (TypeError, ValueError):
         return ""
+
+
+# Provider errors arrive as a raw JSON blob wrapped in an SDK exception name.
+# That is the right thing to log and the wrong thing to show someone who just
+# wants to know what to do about it. Each entry is (marker in the raw text, what
+# the operator can act on).
+_KNOWN_ERRORS = (
+    ("credit balance is too low",
+     "Your Anthropic account is out of credit. Top it up at "
+     "console.anthropic.com → Plans & Billing."),
+    ("invalid x-api-key",
+     "That API key was rejected. Check ANTHROPIC_API_KEY in your .env."),
+    ("authentication_error",
+     "The provider rejected the credentials. Check the key in your .env."),
+    ("permission_error",
+     "That key is not allowed to use this model."),
+    ("not_found_error",
+     "The provider does not know that model — check the profile's model ref."),
+    ("rate_limit",
+     "Rate limited. Forge retries these automatically; this one outlasted the "
+     "retry budget."),
+    ("overloaded",
+     "The provider is overloaded. Forge retries these automatically; this one "
+     "outlasted the retry budget."),
+    ("prompt is too long",
+     "The conversation outgrew the window and could not be compacted further. "
+     "Try /clear."),
+)
+
+
+def humanize_error(raw: str) -> str:
+    """Turn a provider's error into something with a next step in it.
+
+    The raw text is kept as a second line rather than discarded: the friendly
+    sentence is a guess about intent, and when the guess is wrong the operator
+    still needs what actually came back."""
+    lowered = raw.lower()
+    for marker, advice in _KNOWN_ERRORS:
+        if marker in lowered:
+            return f"{advice}\n    {ansi.truncate(raw, 160)}"
+    return ansi.truncate(raw, 300)
 
 
 def banner(agent: str, model: str, workspace: str, tools: int) -> str:

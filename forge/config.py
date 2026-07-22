@@ -12,6 +12,40 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
+def load_dotenv(path: Path | None = None) -> int:
+    """Read `.env` into the environment. Returns how many names it set.
+
+    Deliberately not `python-dotenv`: this is twenty lines of parsing for a
+    file format that is `NAME=value`, and the install stays three packages.
+
+    **A real environment variable always wins.** The file is a convenience for
+    running locally, not a source of truth — an operator who exported a key for
+    one command should not have it silently replaced by a stale line in a file
+    they forgot about."""
+    path = path or Path(".env")
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return 0
+
+    count = 0
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        name, _, value = line.partition("=")
+        name = name.strip().removeprefix("export ").strip()
+        if not name or name in os.environ:
+            continue
+        value = value.strip()
+        # Strip one layer of matching quotes; anything else is literal.
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        os.environ[name] = value
+        count += 1
+    return count
+
+
 def _env(name: str, default: str = "") -> str:
     return os.environ.get(name, default).strip()
 
