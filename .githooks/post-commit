@@ -1,0 +1,6 @@
+#!/bin/sh
+# Git post-commit hook: Auto-push commits to remote repository
+echo "--------------------------------------------------------"
+echo "Auto-pushing commits to remote..."
+echo "--------------------------------------------------------"
+git push origin HEAD
