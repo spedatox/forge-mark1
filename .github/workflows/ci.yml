@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [ "**" ]
 
+env:
+  FORGE_CELL_BACKEND: subprocess
+
 jobs:
   test:
     name: Run Tests & Demo Verification
@@ -31,7 +34,7 @@ jobs:
 
       - name: Run Pytest Test Suite
         run: |
-          pytest
+          python -m pytest
 
       - name: Run Forge Demo Verification
         run: |
