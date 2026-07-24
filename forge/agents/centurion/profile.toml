@@ -30,6 +30,13 @@ cpus          = 2.0
 memory_mb     = 2048
 # Scans and enumeration run longer than a build step — give commands more wall-clock.
 timeout_s     = 300
-# NOTE: real tooling (nmap, nikto, …) must exist in the Cell. With the Docker
-# backend, point FORGE_CELL_IMAGE at a security image; with the subprocess
-# backend (Docker-less hosts) commands use whatever is installed on the host.
+# Centurion builds his lab from THIS image, not Optimus's python:3.12-slim — a
+# per-agent override (cfg.cell.image) that wins over the process-wide
+# FORGE_CELL_IMAGE. Point it at whatever security toolchain image the host has
+# pulled (nmap/nikto/nuclei/…); kalilinux/kali-rolling is the broad default, but
+# a slimmer purpose-built image works too. Under the subprocess backend (a
+# Docker-less host) this is ignored and commands use whatever is installed
+# locally — so on such hosts, install the tooling on the host instead.
+image         = "kalilinux/kali-rolling"
+run_as_root   = true
+cap_add       = ["NET_RAW", "NET_ADMIN", "NET_BIND_SERVICE", "CHOWN", "DAC_OVERRIDE", "SETUID", "SETGID", "FOWNER"]

@@ -15,6 +15,15 @@ class CellSpec:
     memory_mb: int = 1024
     timeout_s: int = 60
     backend: str | None = None      # None → use the process-wide FORGE_CELL_BACKEND
+    image: str | None = None        # None → use the process-wide FORGE_CELL_IMAGE.
+    #                                 A security agent points this at a toolchain
+    #                                 image (nmap/nikto/…) so its Cell IS its lab.
+    # ── Lab posture (operator-set, mirrors CellPolicy) ──────────────────────────
+    # Off by default — every agent's Cell is non-root with ALL caps dropped. A
+    # security agent that must provision its own tooling and run raw-socket scans
+    # opts in here; nothing a job says can reach these.
+    run_as_root: bool = False       # container uid 0 (apt, privileged tooling)
+    cap_add: tuple[str, ...] = ()   # Linux caps whitelisted back (e.g. NET_RAW)
 
 
 @dataclass(frozen=True)

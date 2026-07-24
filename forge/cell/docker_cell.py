@@ -25,8 +25,11 @@ from pathlib import Path
 from forge.cell.base import Cell, CellPolicy, CommandResult
 
 WORKDIR = "/workspace"
-# The Cell runs as this uid — never root, and never configurable, so a job can
-# not talk its way into a privileged container.
+# The Cell's default uid — non-root. A JOB can never change this; only an
+# OPERATOR, via CellPolicy.run_as_root in the agent's profile (a lab agent that
+# must provision its own tooling), flips the container to uid 0. The distinction
+# is the whole point: the container can't talk its way up, the operator declares
+# it up front, and every other agent stays exactly as locked down as before.
 CELL_UID = 1000
 
 
@@ -39,6 +42,9 @@ class DockerCell(Cell):
                  workspace_mount: "Path | None" = None) -> None:
         self.image = image
         self.policy = policy
+        # Effective uid for this Cell: root only when the operator opted the
+        # agent into a lab posture, else the locked-down non-root default.
+        self.uid = 0 if policy.run_as_root else CELL_UID
         # Optional host directory bind-mounted to /workspace — the only host
         # mount, matching Mark VI's packages/sandbox posture. When None, the
         # workspace is ephemeral inside the container.
@@ -78,10 +84,15 @@ class DockerCell(Cell):
             "--memory", f"{self.policy.memory_mb}m",
             "--cpus", str(self.policy.cpus),
             "--pids-limit", str(self.policy.pids_limit),
-            "--user", f"{CELL_UID}:{CELL_UID}",  # non-root
+            "--user", f"{self.uid}:{self.uid}",
+            # Whitelist model: drop everything, then add back only the caps the
+            # operator granted this agent (empty for every non-lab agent, so the
+            # default posture is unchanged — ALL dropped).
             "--cap-drop", "ALL",
             "--security-opt", "no-new-privileges",
         ]
+        for cap in self.policy.cap_add:
+            args += ["--cap-add", cap]
         if not self.policy.allow_network:
             args += ["--network", "none"]       # default posture: no outbound network (§8)
         if self.workspace_mount is not None:
@@ -99,7 +110,7 @@ class DockerCell(Cell):
         # that part from outside, where the privilege actually exists.
         await self._docker("exec", "--user", "0:0", self.container,
                            "sh", "-c",
-                           f"mkdir -p {WORKDIR} && chown {CELL_UID}:{CELL_UID} {WORKDIR} 2>/dev/null || true",
+                           f"mkdir -p {WORKDIR} && chown {self.uid}:{self.uid} {WORKDIR} 2>/dev/null || true",
                            timeout=15)
         # Fail loud rather than hand the Warden a Cell whose every write dies
         # with EACCES halfway through a job (§9.5: assume the environment).
@@ -108,7 +119,7 @@ class DockerCell(Cell):
         if code != 0:
             await self.close()
             raise DockerError(
-                f"Cell workspace {WORKDIR} is not writable by uid {CELL_UID}. "
+                f"Cell workspace {WORKDIR} is not writable by uid {self.uid}. "
                 f"Give {self.workspace_mount} to that uid, or make it group-writable "
                 f"for a group the uid belongs to."
             )
@@ -134,8 +145,8 @@ class DockerCell(Cell):
             return
         try:
             st = self.workspace_mount.stat()
-            if st.st_uid != CELL_UID:
-                chown(self.workspace_mount, CELL_UID, -1)
+            if st.st_uid != self.uid:
+                chown(self.workspace_mount, self.uid, -1)
             # Keep the group's access at least as wide as the owner's, so a
             # shared vault group can still read and clean up what lands here.
             os.chmod(self.workspace_mount, st.st_mode | 0o070)

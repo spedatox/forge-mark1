@@ -69,10 +69,12 @@ async def run_repl(agent: str = "optimus", workspace: Path | None = None,
         cell = await build_cell(
             agent_id=cfg.agent_id, workspace_root=settings.workspace_root,
             backend=cfg.cell.backend or settings.cell_backend,
-            image=settings.cell_image,
+            image=cfg.cell.image or settings.cell_image,
             policy=CellPolicy(allow_network=cfg.cell.allow_network,
                               cpus=cfg.cell.cpus, memory_mb=cfg.cell.memory_mb,
-                              default_timeout_s=cfg.cell.timeout_s),
+                              default_timeout_s=cfg.cell.timeout_s,
+                              run_as_root=cfg.cell.run_as_root,
+                              cap_add=cfg.cell.cap_add),
             workspace=workspace)
 
         request = JobRequest(agent=cfg.agent_id, task="", repo_path=str(workspace))

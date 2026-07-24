@@ -27,6 +27,13 @@ class CellPolicy:
     default_timeout_s: int = 60        # per-command wall clock when a call omits one
     max_timeout_s: int = 600           # hard ceiling a per-command timeout cannot exceed
     max_output_bytes: int = 100_000    # cap returned stdout+stderr so a runaway can't flood
+    # ── Lab posture ────────────────────────────────────────────────────────────
+    # Off by default: every Cell is non-root with ALL Linux capabilities dropped.
+    # An OPERATOR (never a job) can relax this per agent in the profile, exactly
+    # like allow_network — a security agent needs root to provision its own
+    # toolchain (apt) and raw-socket caps to scan, so its Cell IS its lab.
+    run_as_root: bool = False          # uid 0 in the container (DockerCell --user 0:0)
+    cap_add: tuple[str, ...] = ()      # caps whitelisted back after --cap-drop ALL
 
 
 class Cell(abc.ABC):

@@ -87,5 +87,8 @@ def _load_one(profile_path: Path, prompt_path: Path) -> AgentConfig:
             memory_mb=int(cell.get("memory_mb", 1024)),
             timeout_s=int(cell.get("timeout_s", 60)),
             backend=cell.get("backend"),
+            image=cell.get("image"),
+            run_as_root=bool(cell.get("run_as_root", False)),
+            cap_add=tuple(cell.get("cap_add", [])),
         ),
     )

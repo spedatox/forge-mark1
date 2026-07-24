@@ -82,6 +82,8 @@ async def run_job(
         cpus=cfg.cell.cpus,
         memory_mb=cfg.cell.memory_mb,
         default_timeout_s=c.timeout_s or cfg.cell.timeout_s,
+        run_as_root=cfg.cell.run_as_root,
+        cap_add=cfg.cell.cap_add,
     )
 
     cell = None
@@ -92,7 +94,7 @@ async def run_job(
             agent_id=cfg.agent_id,
             workspace_root=settings.workspace_root,
             backend=cfg.cell.backend or settings.cell_backend,
-            image=settings.cell_image,
+            image=cfg.cell.image or settings.cell_image,
             policy=policy,
             workspace=repo_path,
         )
